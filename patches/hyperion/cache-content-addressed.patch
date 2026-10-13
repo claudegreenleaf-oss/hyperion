@@ -1,0 +1,319 @@
+--- a/net/base/features.h
++++ b/net/base/features.h
+@@ -1071,6 +1071,15 @@
+ NET_EXPORT BASE_DECLARE_FEATURE(kQuicSocketSendBufferSize);
+ NET_EXPORT BASE_DECLARE_FEATURE_PARAM(int, kQuicSocketSendBufferSizeParam);
+ 
++// Hyperion: treat cached static assets whose URL carries a content hash
++// (e.g. app.3f9a1c7e.js) as fresh for `kContentAddressedFreshness`, overriding
++// a shorter max-age or must-revalidate. Such URLs change whenever their content
++// does, so revalidating them only ever yields 304s. no-cache and no-store are
++// still honored.
++NET_EXPORT BASE_DECLARE_FEATURE(kContentAddressedImmutable);
++NET_EXPORT BASE_DECLARE_FEATURE_PARAM(base::TimeDelta,
++                                      kContentAddressedFreshness);
++
+ }  // namespace net::features
+ 
+ #endif  // NET_BASE_FEATURES_H_
+--- a/net/base/features.cc
++++ b/net/base/features.cc
+@@ -1086,5 +1086,12 @@
+                    &kQuicSocketSendBufferSize,
+                    1048576);
+ 
++BASE_FEATURE(kContentAddressedImmutable, base::FEATURE_ENABLED_BY_DEFAULT);
++BASE_FEATURE_PARAM(base::TimeDelta,
++                   kContentAddressedFreshness,
++                   &kContentAddressedImmutable,
++                   "freshness",
++                   base::Days(30));
++
+ }  // namespace net::features
+ 
+--- a/net/http/http_util.h
++++ b/net/http/http_util.h
+@@ -160,6 +160,13 @@
+                       size_t& begin_offset,
+                       size_t& end_offset);
+ 
++  // Returns true if `url` looks like a content-addressed static asset: an https
++  // URL whose last path segment has a static-asset extension and whose stem
++  // contains a hash-like token, as emitted by bundlers ("app.3f9a1c7e.js",
++  // "main-4f2c9d1a8b.css", "logo.Ab3dE9fQ.svg"). Used to skip revalidation of
++  // responses that cannot have changed.
++  static bool IsLikelyContentAddressedUrl(const GURL& url);
++
+   // Whether the character is a valid |tchar| as defined in RFC 7230 Sec 3.2.6.
+   static bool IsTokenChar(char c);
+   // Whether the string is a valid |token| as defined in RFC 7230 Sec 3.2.6.
+--- a/net/http/http_util.cc
++++ b/net/http/http_util.cc
+@@ -30,6 +30,7 @@
+ #include "net/http/http_response_headers.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+ #include "url/gurl.h"
++#include "url/url_constants.h"
+ 
+ namespace net {
+ 
+@@ -566,6 +567,79 @@
+   }
+ }
+ 
++namespace {
++
++// A hex digest (webpack, esbuild, Rollup default) or a base64url-style digest
++// (Vite, Parcel). Requiring a digit, and for the non-hex form mixed case with no
++// run of four lowercase letters, keeps ordinary words such as "LoginForm",
++// "Html5Player" or "deadbeef" from qualifying.
++bool IsHashLikeToken(std::string_view token) {
++  if (token.size() < 8 || token.size() > 64) {
++    return false;
++  }
++  bool has_digit = false, has_lower = false, has_upper = false;
++  bool all_hex = true;
++  size_t lower_run = 0, max_lower_run = 0;
++  for (char c : token) {
++    if (base::IsAsciiLower(c)) {
++      has_lower = true;
++      all_hex &= c <= 'f';
++      max_lower_run = std::max(max_lower_run, ++lower_run);
++      continue;
++    }
++    lower_run = 0;
++    if (base::IsAsciiDigit(c)) {
++      has_digit = true;
++    } else if (base::IsAsciiUpper(c)) {
++      has_upper = true;
++      all_hex = false;
++    } else {
++      return false;
++    }
++  }
++  if (!has_digit) {
++    return false;
++  }
++  if (all_hex) {
++    return has_lower;
++  }
++  return has_lower && has_upper && token.size() <= 16 && max_lower_run < 4;
++}
++
++}  // namespace
++
++// static
++bool HttpUtil::IsLikelyContentAddressedUrl(const GURL& url) {
++  if (!url.is_valid() || !url.SchemeIs(url::kHttpsScheme)) {
++    return false;
++  }
++  std::string_view path = url.path();
++  size_t slash = path.rfind('/');
++  std::string_view segment =
++      slash == std::string_view::npos ? path : path.substr(slash + 1);
++  size_t dot = segment.rfind('.');
++  if (dot == std::string_view::npos || dot == 0) {
++    return false;
++  }
++  static constexpr std::string_view kExtensions[] = {
++      "js",  "mjs", "css",  "woff2", "woff", "ttf",  "otf",  "wasm",
++      "png", "jpg", "jpeg", "webp",  "avif", "gif",  "svg",  "ico"};
++  std::string_view extension = segment.substr(dot + 1);
++  if (std::ranges::none_of(kExtensions, [&](std::string_view e) {
++        return base::EqualsCaseInsensitiveASCII(extension, e);
++      })) {
++    return false;
++  }
++  for (std::string_view token :
++       base::SplitStringPiece(segment.substr(0, dot), ".-_",
++                              base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    if (IsHashLikeToken(token)) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ bool HttpUtil::IsTokenChar(char c) {
+   // See RFC 7230 Sec 3.2.6.
+   static constexpr std::array<uint32_t, 8> kIsTokenCharMask = [] {
+--- a/net/http/http_util_unittest.cc
++++ b/net/http/http_util_unittest.cc
+@@ -1946,6 +1946,49 @@
+   }
+ }
+ 
++TEST(HttpUtilTest, IsLikelyContentAddressedUrl) {
++  const struct {
++    const char* url;
++    bool expected;
++  } kCases[] = {
++      // Bundler output: hex digests.
++      {"https://a.test/static/app.3f9a1c7e.js", true},
++      {"https://a.test/assets/main-4f2c9d1a8b7e.css", true},
++      {"https://a.test/chunks/942.0d5e2f1ab3c4d5e6f7a8.js", true},
++      {"https://a.test/fonts/inter_1a2b3c4d.woff2", true},
++      // Base64url-style digests with mixed case and a digit.
++      {"https://a.test/assets/logo.Ab3dE9fQ.svg", true},
++      {"https://a.test/assets/index.BrSyl3mQ.js?v=2", true},
++      // Extension check is case-insensitive.
++      {"https://a.test/IMG.3f9a1c7e.PNG", true},
++      // Not https.
++      {"http://a.test/static/app.3f9a1c7e.js", false},
++      // Not a static asset.
++      {"https://a.test/api/session.3f9a1c7e.json", false},
++      {"https://a.test/page.3f9a1c7e.html", false},
++      {"https://a.test/3f9a1c7e", false},
++      // Hash only in a directory, not the file name.
++      {"https://a.test/3f9a1c7e/app.js", false},
++      // Ordinary names.
++      {"https://a.test/js/LoginForm.js", false},
++      {"https://a.test/js/Html5Player.js", false},
++      {"https://a.test/js/Video4Linux.js", false},
++      {"https://a.test/js/application.js", false},
++      {"https://a.test/img/deadbeef.png", false},
++      {"https://a.test/js/jquery-3.7.1.min.js", false},
++      {"https://a.test/js/vendor.bundle.js", false},
++      // Too short, or digits only.
++      {"https://a.test/app.3f9a1c.js", false},
++      {"https://a.test/app.20261012.js", false},
++      // Extension only.
++      {"https://a.test/.3f9a1c7e", false},
++  };
++  for (const auto& c : kCases) {
++    SCOPED_TRACE(c.url);
++    EXPECT_EQ(c.expected, HttpUtil::IsLikelyContentAddressedUrl(GURL(c.url)));
++  }
++}
++
+ TEST(HttpUtilTest, IsToken) {
+   EXPECT_TRUE(HttpUtil::IsToken("valid"));
+   EXPECT_TRUE(HttpUtil::IsToken("!"));
+--- a/net/http/http_cache_transaction.h
++++ b/net/http/http_cache_transaction.h
+@@ -464,6 +464,11 @@
+   // and whether the validation should be synchronous or asynchronous.
+   ValidationType RequiresValidation();
+ 
++  // Returns true if the cached response is a content-addressed static asset
++  // still inside the kContentAddressedImmutable window, so it can be used
++  // without revalidation even if its headers say otherwise.
++  bool IsFreshContentAddressedResponse() const;
++
+   // Called to make the request conditional (to ask the server if the cached
+   // copy is valid).  Returns true if able to make the request conditional.
+   bool ConditionalizeRequest();
+--- a/net/http/http_cache_transaction.cc
++++ b/net/http/http_cache_transaction.cc
+@@ -3277,6 +3277,11 @@
+     return VALIDATION_SYNCHRONOUS;
+   }
+ 
++  if (validation_required_by_headers != VALIDATION_NONE &&
++      IsFreshContentAddressedResponse()) {
++    return VALIDATION_NONE;
++  }
++
+   if (validation_required_by_headers == VALIDATION_ASYNCHRONOUS) {
+     // Asynchronous revalidation is only supported for GET methods.
+     if (request_->method != "GET") {
+@@ -3292,6 +3297,24 @@
+   }
+ 
+   return validation_required_by_headers;
++}
++
++bool HttpCache::Transaction::IsFreshContentAddressedResponse() const {
++  if (!base::FeatureList::IsEnabled(features::kContentAddressedImmutable)) {
++    return false;
++  }
++  const HttpResponseHeaders& headers = *response_.headers;
++  if (method_ != "GET" || headers.response_code() != HTTP_OK ||
++      !headers.HasValidators() ||
++      headers.HasHeaderValue("cache-control", "no-cache") ||
++      headers.HasHeaderValue("cache-control", "no-store") ||
++      headers.HasHeaderValue("pragma", "no-cache") ||
++      !HttpUtil::IsLikelyContentAddressedUrl(request_->url)) {
++    return false;
++  }
++  return headers.GetCurrentAge(response_.request_time, response_.response_time,
++                               cache_->clock_->Now()) <
++         features::kContentAddressedFreshness.Get();
+ }
+ 
+ bool HttpCache::Transaction::IsResponseConditionalizable(
+--- a/third_party/blink/renderer/platform/loader/fetch/DEPS
++++ b/third_party/blink/renderer/platform/loader/fetch/DEPS
+@@ -4,6 +4,7 @@
+   "+components/persistent_cache",
+   "+components/subresource_filter/core/common/scoped_rule.h",
+   "+net/base/auth.h",
++  "+net/base/features.h",
+   "+net/base/ip_endpoint.h",
+   "+net/dns/public",
+   "+net/filter/source_stream_type.h",
+--- a/third_party/blink/renderer/platform/loader/fetch/resource.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource.cc
+@@ -38,6 +38,8 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/default_clock.h"
+ #include "build/build_config.h"
++#include "net/base/features.h"
++#include "net/http/http_util.h"
+ #include "services/network/public/mojom/fetch_api.mojom-blink.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/scheme_registry.h"
+@@ -61,6 +63,7 @@
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_load_timing.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_loader.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/background_response_processor.h"
++#include "third_party/blink/renderer/platform/network/http_names.h"
+ #include "third_party/blink/renderer/platform/network/http_parsers.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/thread_scheduler.h"
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+@@ -70,6 +73,7 @@
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ #include "third_party/blink/renderer/platform/wtf/vector.h"
++#include "url/gurl.h"
+ 
+ namespace blink {
+ 
+@@ -533,8 +537,9 @@
+   return corrected_received_age + resident_time;
+ }
+ 
+-static base::TimeDelta FreshnessLifetime(const ResourceResponse& response,
+-                                         base::Time response_timestamp) {
++static base::TimeDelta StandardFreshnessLifetime(
++    const ResourceResponse& response,
++    base::Time response_timestamp) {
+ #if !BUILDFLAG(IS_ANDROID)
+   // On desktop, local files should be reloaded in case they change.
+   if (response.CurrentRequestUrl().IsLocalFile())
+@@ -562,6 +567,25 @@
+   // If no cache headers are present, the specification leaves the decision to
+   // the UA. Other browsers seem to opt for 0.
+   return base::TimeDelta();
++}
++
++// Mirrors net::HttpCache::Transaction::IsFreshContentAddressedResponse() so the
++// memory cache does not send a conditional request that the HTTP cache would
++// have skipped. no-cache and no-store are handled by CanUseResponse().
++static base::TimeDelta FreshnessLifetime(const ResourceResponse& response,
++                                         base::Time response_timestamp) {
++  base::TimeDelta lifetime =
++      StandardFreshnessLifetime(response, response_timestamp);
++  if (base::FeatureList::IsEnabled(net::features::kContentAddressedImmutable) &&
++      response.HttpStatusCode() == 200 &&
++      (response.LastModified() ||
++       !response.HttpHeaderField(http_names::kETag).empty()) &&
++      net::HttpUtil::IsLikelyContentAddressedUrl(
++          GURL(response.CurrentRequestUrl()))) {
++    lifetime =
++        std::max(lifetime, net::features::kContentAddressedFreshness.Get());
++  }
++  return lifetime;
+ }
+ 
+ base::TimeDelta Resource::FreshnessLifetime() const {

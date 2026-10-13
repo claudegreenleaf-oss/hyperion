@@ -31,3 +31,4 @@ hyperion/preload-pages-standard.patch
 hyperion/net-finch-parity.patch
 hyperion/loading-predictors.patch
 hyperion/speculation-inject.patch
+hyperion/cache-content-addressed.patch

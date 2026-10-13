@@ -97,6 +97,26 @@ perform actions on GET (log out, delete, remove, unsubscribe, cart, checkout), d
 `rel=nofollow` and `target=_blank`. Chromium's own limits still apply: two non-immediate
 prerenders and the prefetch active-set limit.
 
+### `cache-content-addressed` (new code)
+Facebook measured that revalidations of content-addressed resources always return 304
+(https://engineering.fb.com/2017/01/26/web/this-browser-tweak-saved-60-of-requests-to-facebook/,
+IETF 97 `immutable` slides), and Vesuna et al. (USENIX ATC'16) showed that critical-path
+objects are the ones a cache most often fails to help with. Bundlers put a content hash
+in the file name of exactly those render-blocking scripts and stylesheets, so the URL
+itself proves the bytes cannot have changed. Many hosts still send `max-age=0,
+must-revalidate` on them (Netlify's default), which costs a round trip per dependency
+level on every revisit.
+
+`net::HttpUtil::IsLikelyContentAddressedUrl` accepts https URLs with a static-asset
+extension whose stem has a hex digest (8+ chars with a digit) or a base64url digest (8 to
+16 chars, mixed case, a digit, no run of four lowercase letters, so words like
+`Html5Player` do not match). `HttpCache::Transaction::IsFreshContentAddressedResponse`
+then skips validation for GET 200 responses with a validator, younger than 30 days, not
+marked `no-cache`/`no-store`. Blink's `FreshnessLifetime` mirrors the rule, otherwise
+the memory cache would send its own conditional request. Explicit reloads
+(`LOAD_VALIDATE_CACHE`) still revalidate. Covered by `HttpUtilTest.IsLikelyContentAddressedUrl`;
+the existing `HttpCache*` (392) and Blink resource and memory-cache (349) suites pass.
+
 ## Not pursued, and why
 
 - **A relay on scotus-vps (MASQUE or a split-connection proxy).** The VPS is 21 ms from home,

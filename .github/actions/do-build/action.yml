@@ -28,6 +28,18 @@ outputs:
 runs:
   using: composite
   steps:
+    # Hyperion: forks have no sccache WebDAV secret, so sccache falls back to
+    # the GitHub Actions cache, which needs the runner's cache credentials in
+    # the environment of later steps.
+    - name: Expose Actions cache to sccache
+      uses: actions/github-script@v7
+      with:
+        script: |
+          for (const name of ['ACTIONS_CACHE_URL', 'ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_TOKEN']) {
+            if (process.env[name]) core.exportVariable(name, process.env[name]);
+          }
+          core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+
     - name: Show sccache stats before build
       run: sccache --show-stats
       shell: bash
