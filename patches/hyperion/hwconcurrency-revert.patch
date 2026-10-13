@@ -1,0 +1,11 @@
+--- a/third_party/blink/common/features.cc
++++ b/third_party/blink/common/features.cc
+@@ -61,7 +61,7 @@ BASE_FEATURE(kHeliumNoiseAudio,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ // navigator.hardwareConcurrency noising for fingerprint protection.
+-BASE_FEATURE(kHeliumNoiseCpuCores, base::FEATURE_ENABLED_BY_DEFAULT);
++BASE_FEATURE(kHeliumNoiseCpuCores, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // Controls whether to include information about the page's open popup in
+ // AIPageContent.

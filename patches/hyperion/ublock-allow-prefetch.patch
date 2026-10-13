@@ -1,0 +1,11 @@
+--- a/third_party/ublock/js/background.js
++++ b/third_party/ublock/js/background.js
+@@ -117,7 +117,7 @@ const µBlock = {  // jshint ignore:line
+     largeMediaSize: 50,
+     parseAllABPHideFilters: true,
+     popupPanelSections: 0b111,
+-    prefetchingDisabled: true,
++    prefetchingDisabled: false,
+     requestLogMaxEntries: 1000,
+     showIconBadge: true,
+     suspendUntilListsAreLoaded: vAPI.Net.canSuspend(),
