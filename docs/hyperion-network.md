@@ -117,6 +117,36 @@ the memory cache would send its own conditional request. Explicit reloads
 (`LOAD_VALIDATE_CACHE`) still revalidate. Covered by `HttpUtilTest.IsLikelyContentAddressedUrl`;
 the existing `HttpCache*` (392) and Blink resource and memory-cache (349) suites pass.
 
+### `navigation-model` (new code)
+Hover prefetch only starts once the pointer reaches a link, leaving 100 to 300 ms of the
+hover-to-click gap as the whole head start. Predicting the click from history starts the
+fetch when the page settles instead. The research line is Padmanabhan and Mogul (1996,
+predictive prefetching from access dependencies) and the Markov and PPM predictors that
+followed; Deshpande and Karypis (SDM 2001, ACM TOIT 2004) showed that pruning
+low-support states and backing off between model orders keeps accuracy while cutting
+model size by up to 90%. No published number exists for Chrome's own model, and Helium
+removes it anyway (`ungoogled-chromium/disable-ai.patch` empties
+`OnMLModelExecutionTimerFired`), while leaving the path from a score to a preloading
+decision intact.
+
+`HyperionNavigationModel` (owned by `NavigationPredictorKeyedService`) counts page views
+and same-origin link clicks per page, keyed by origin plus path and by a template where
+ID-like path segments become `*`. The score is a smoothed first-order estimate
+`clicks / (views + 2)`, blended with the template estimate by `views / (views + 3)`, and is
+zero until a link has two recorded clicks. `NavigationPredictor` records the view and
+each click, scores the page's anchors 300 ms and 2 s after they are reported (the
+injected speculation rules exist only after parsing, and the decider enacts only
+predictions that match a registered candidate), and passes the top two to
+`PreloadingDecider::OnPreloadingHeuristicsModelDone`. `enact_candidates` is on with a
+prefetch threshold of 0.35 (a link followed on about half of visits). The decider patch
+stops a model prediction from switching off the hover heuristic for every other link.
+
+Storage is a JSON file in the profile (`Hyperion Navigation Model`, at most 4,000 pages
+by 16 links, least recently used pages evicted, counts halved at 512 views), never
+written off the record, and cleared on any history deletion. Built against Chromium 155
+with the full Helium series on a6000-box; the 9 model tests pass (scoring, smoothing,
+template back-off, cross-origin rejection, clearing, eviction bound, save and reload).
+
 ## Not pursued, and why
 
 - **A relay on scotus-vps (MASQUE or a split-connection proxy).** The VPS is 21 ms from home,

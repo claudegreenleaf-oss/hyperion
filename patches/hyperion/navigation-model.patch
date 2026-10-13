@@ -1,0 +1,934 @@
+diff --git a/chrome/browser/navigation_predictor/BUILD.gn b/chrome/browser/navigation_predictor/BUILD.gn
+index 600d14c567..be79757b48 100644
+--- a/chrome/browser/navigation_predictor/BUILD.gn
++++ b/chrome/browser/navigation_predictor/BUILD.gn
+@@ -8,6 +8,7 @@ assert(is_win || is_mac || is_linux || is_chromeos || is_android)
+ source_set("navigation_predictor") {
+   sources = [
+     "anchor_element_preloader.h",
++    "hyperion_navigation_model.h",
+     "navigation_predictor.h",
+     "navigation_predictor_features.h",
+     "navigation_predictor_keyed_service.h",
+@@ -23,6 +24,7 @@ source_set("navigation_predictor") {
+     "//base",
+     "//chrome/browser/page_load_metrics",
+     "//chrome/browser/profiles:profile",
++    "//components/history/core/browser",
+     "//components/keyed_service/core",
+     "//content/public/browser",
+     "//mojo/public/cpp/bindings",
+@@ -39,6 +41,7 @@ source_set("navigation_predictor") {
+ source_set("impl") {
+   sources = [
+     "anchor_element_preloader.cc",
++    "hyperion_navigation_model.cc",
+     "navigation_predictor.cc",
+     "navigation_predictor_features.cc",
+     "navigation_predictor_keyed_service.cc",
+@@ -58,6 +61,7 @@ source_set("impl") {
+   deps = [
+     ":navigation_predictor",
+     "//chrome/browser/battery",
++    "//chrome/browser/history",
+     "//chrome/browser/optimization_guide",
+     "//chrome/browser/predictors",
+     "//chrome/browser/preloading",
+@@ -116,6 +120,7 @@ if (!is_android) {
+ source_set("unit_tests") {
+   testonly = true
+   sources = [
++    "hyperion_navigation_model_unittest.cc",
+     "navigation_predictor_unittest.cc",
+     "preloading_model_executor_unittest.cc",
+   ]
+diff --git a/chrome/browser/navigation_predictor/hyperion_navigation_model.cc b/chrome/browser/navigation_predictor/hyperion_navigation_model.cc
+new file mode 100644
+index 0000000000..fe09f3b92d
+--- /dev/null
++++ b/chrome/browser/navigation_predictor/hyperion_navigation_model.cc
+@@ -0,0 +1,296 @@
++// Copyright 2026 The Hyperion Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/navigation_predictor/hyperion_navigation_model.h"
++
++#include <algorithm>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "base/task/thread_pool.h"
++#include "base/values.h"
++#include "url/origin.h"
++
++namespace {
++
++constexpr int kFormatVersion = 1;
++constexpr char kExactPrefix[] = "e|";
++constexpr char kTemplatePrefix[] = "t|";
++
++// A path segment is ID-like if it carries a run of two or more digits, or is a
++// long token mixing letters and digits (UUIDs, hashes, slugs with IDs).
++bool IsIdLikeSegment(std::string_view segment) {
++  size_t digit_run = 0;
++  bool has_digit = false;
++  for (char c : segment) {
++    if (base::IsAsciiDigit(c)) {
++      has_digit = true;
++      if (++digit_run >= 2) {
++        return true;
++      }
++    } else {
++      digit_run = 0;
++    }
++  }
++  return has_digit && segment.size() >= 16;
++}
++
++std::string TemplatePath(std::string_view path) {
++  std::vector<std::string_view> segments = base::SplitStringPiece(
++      path, "/", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
++  for (std::string_view& segment : segments) {
++    if (IsIdLikeSegment(segment)) {
++      segment = "*";
++    }
++  }
++  return base::JoinString(segments, "/");
++}
++
++}  // namespace
++
++HyperionNavigationModel::Source::Source() = default;
++HyperionNavigationModel::Source::Source(const Source&) = default;
++HyperionNavigationModel::Source& HyperionNavigationModel::Source::operator=(
++    const Source&) = default;
++HyperionNavigationModel::Source::~Source() = default;
++
++HyperionNavigationModel::HyperionNavigationModel(
++    const base::FilePath& profile_path) {
++  if (profile_path.empty()) {
++    loaded_ = true;
++    return;
++  }
++  base::FilePath file = profile_path.Append(kFileName);
++  scoped_refptr<base::SequencedTaskRunner> task_runner =
++      base::ThreadPool::CreateSequencedTaskRunner(
++          {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
++           base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
++  writer_ = std::make_unique<base::ImportantFileWriter>(file, task_runner,
++                                                        base::Seconds(30));
++  task_runner->PostTaskAndReplyWithResult(
++      FROM_HERE,
++      base::BindOnce(
++          [](const base::FilePath& path) -> std::optional<std::string> {
++            std::string contents;
++            if (!base::ReadFileToString(path, &contents)) {
++              return std::nullopt;
++            }
++            return contents;
++          },
++          file),
++      base::BindOnce(&HyperionNavigationModel::OnLoaded,
++                     weak_factory_.GetWeakPtr()));
++}
++
++HyperionNavigationModel::~HyperionNavigationModel() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (writer_ && writer_->HasPendingWrite()) {
++    writer_->DoScheduledWrite();
++  }
++}
++
++// static
++std::string HyperionNavigationModel::ExactKey(const GURL& url) {
++  return base::StrCat({url.DeprecatedGetOriginAsURL().spec(), url.path().substr(1)});
++}
++
++// static
++std::string HyperionNavigationModel::TemplateKey(const GURL& url) {
++  return url.DeprecatedGetOriginAsURL().spec() +
++         TemplatePath(url.path()).substr(1);
++}
++
++void HyperionNavigationModel::RecordView(const GURL& page) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (!loaded_ || !page.SchemeIsHTTPOrHTTPS()) {
++    return;
++  }
++  std::string exact = ExactKey(page);
++  std::string templ = TemplateKey(page);
++  Touch(kExactPrefix + exact).views++;
++  if (templ != exact) {
++    Touch(kTemplatePrefix + templ).views++;
++  }
++  EvictIfNeeded();
++  ScheduleWrite();
++}
++
++void HyperionNavigationModel::RecordClick(const GURL& page,
++                                          const GURL& target) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (!loaded_ || !page.SchemeIsHTTPOrHTTPS() ||
++      url::Origin::Create(page) != url::Origin::Create(target)) {
++    return;
++  }
++  std::string exact = ExactKey(page);
++  std::string templ = TemplateKey(page);
++  AddClick(Touch(kExactPrefix + exact), target.GetWithoutRef().spec());
++  if (templ != exact) {
++    AddClick(Touch(kTemplatePrefix + templ), TemplateKey(target));
++  }
++  EvictIfNeeded();
++  ScheduleWrite();
++}
++
++float HyperionNavigationModel::Score(const GURL& page,
++                                     const GURL& target) const {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (!loaded_ || !page.SchemeIsHTTPOrHTTPS() ||
++      url::Origin::Create(page) != url::Origin::Create(target)) {
++    return 0.f;
++  }
++  std::string exact = ExactKey(page);
++  std::string templ = TemplateKey(page);
++  auto [exact_views, exact_clicks] =
++      Counts(kExactPrefix + exact, target.GetWithoutRef().spec());
++  uint32_t templ_views = 0, templ_clicks = 0;
++  if (templ != exact) {
++    std::tie(templ_views, templ_clicks) =
++        Counts(kTemplatePrefix + templ, TemplateKey(target));
++  }
++  if (std::max(exact_clicks, templ_clicks) < kMinClicks) {
++    return 0.f;
++  }
++  // Additive smoothing: a link clicked on every one of two visits scores 0.5,
++  // not 1.0, until more evidence arrives.
++  auto estimate = [](uint32_t clicks, uint32_t views) {
++    return views == 0 ? 0.f
++                      : std::min(1.f, clicks / (static_cast<float>(views) + 2.f));
++  };
++  float exact_p = estimate(exact_clicks, exact_views);
++  if (templ == exact) {
++    return exact_p;
++  }
++  float lambda = exact_views / (static_cast<float>(exact_views) + 3.f);
++  return lambda * exact_p + (1.f - lambda) * estimate(templ_clicks, templ_views);
++}
++
++void HyperionNavigationModel::Clear() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  sources_.clear();
++  ScheduleWrite();
++}
++
++std::optional<std::string> HyperionNavigationModel::SerializeData() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  base::DictValue sources;
++  for (const auto& [key, source] : sources_) {
++    base::DictValue clicks;
++    for (const auto& [target, count] : source.clicks) {
++      clicks.Set(target, static_cast<int>(count));
++    }
++    sources.Set(key, base::DictValue()
++                         .Set("n", static_cast<int>(source.views))
++                         .Set("t", source.last_used.InSecondsFSinceUnixEpoch())
++                         .Set("c", std::move(clicks)));
++  }
++  return base::WriteJson(base::DictValue()
++                             .Set("v", kFormatVersion)
++                             .Set("sources", std::move(sources)));
++}
++
++HyperionNavigationModel::Source& HyperionNavigationModel::Touch(
++    const std::string& key) {
++  Source& source = sources_[key];
++  source.last_used = base::Time::Now();
++  if (source.views >= kSaturationViews) {
++    source.views /= 2;
++    for (auto& [target, count] : source.clicks) {
++      count /= 2;
++    }
++    std::erase_if(source.clicks, [](const auto& kv) { return kv.second == 0; });
++  }
++  return source;
++}
++
++void HyperionNavigationModel::AddClick(Source& source,
++                                       const std::string& target_key) {
++  source.clicks[target_key]++;
++  // A click implies a view of the source page even if the view was missed
++  // (for example, the page was restored from the back/forward cache).
++  source.views = std::max(source.views, source.clicks[target_key]);
++  if (source.clicks.size() > kMaxTargetsPerSource) {
++    auto weakest = std::ranges::min_element(
++        source.clicks, {}, [](const auto& kv) { return kv.second; });
++    source.clicks.erase(weakest);
++  }
++}
++
++void HyperionNavigationModel::EvictIfNeeded() {
++  if (sources_.size() <= kMaxSources) {
++    return;
++  }
++  // Drop the least recently used tenth in one pass so eviction stays rare.
++  std::vector<std::pair<base::Time, std::string>> by_age;
++  by_age.reserve(sources_.size());
++  for (const auto& [key, source] : sources_) {
++    by_age.emplace_back(source.last_used, key);
++  }
++  size_t to_drop = sources_.size() - kMaxSources * 9 / 10;
++  std::ranges::nth_element(by_age, by_age.begin() + to_drop);
++  for (size_t i = 0; i < to_drop; ++i) {
++    sources_.erase(by_age[i].second);
++  }
++}
++
++void HyperionNavigationModel::ScheduleWrite() {
++  if (writer_) {
++    writer_->ScheduleWrite(this);
++  }
++}
++
++void HyperionNavigationModel::OnLoaded(std::optional<std::string> contents) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  loaded_ = true;
++  if (!contents) {
++    return;
++  }
++  std::optional<base::DictValue> root =
++      base::JSONReader::ReadDict(*contents, base::JSON_PARSE_RFC);
++  if (!root || root->FindInt("v") != kFormatVersion) {
++    return;
++  }
++  const base::DictValue* sources = root->FindDict("sources");
++  if (!sources) {
++    return;
++  }
++  for (const auto [key, value] : *sources) {
++    const base::DictValue* dict = value.GetIfDict();
++    if (!dict) {
++      continue;
++    }
++    Source source;
++    source.views = std::max(0, dict->FindInt("n").value_or(0));
++    source.last_used = base::Time::FromSecondsSinceUnixEpoch(
++        dict->FindDouble("t").value_or(0));
++    if (const base::DictValue* clicks = dict->FindDict("c")) {
++      for (const auto [target, count] : *clicks) {
++        if (count.is_int() && count.GetInt() > 0) {
++          source.clicks[target] = count.GetInt();
++        }
++      }
++    }
++    sources_[key] = std::move(source);
++  }
++  EvictIfNeeded();
++}
++
++std::pair<uint32_t, uint32_t> HyperionNavigationModel::Counts(
++    const std::string& source_key,
++    const std::string& target_key) const {
++  auto it = sources_.find(source_key);
++  if (it == sources_.end()) {
++    return {0, 0};
++  }
++  auto click = it->second.clicks.find(target_key);
++  return {it->second.views,
++          click == it->second.clicks.end() ? 0 : click->second};
++}
+diff --git a/chrome/browser/navigation_predictor/hyperion_navigation_model.h b/chrome/browser/navigation_predictor/hyperion_navigation_model.h
+new file mode 100644
+index 0000000000..8f05985d71
+--- /dev/null
++++ b/chrome/browser/navigation_predictor/hyperion_navigation_model.h
+@@ -0,0 +1,103 @@
++// Copyright 2026 The Hyperion Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_NAVIGATION_PREDICTOR_HYPERION_NAVIGATION_MODEL_H_
++#define CHROME_BROWSER_NAVIGATION_PREDICTOR_HYPERION_NAVIGATION_MODEL_H_
++
++#include <cstdint>
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/files/important_file_writer.h"
++#include "base/memory/weak_ptr.h"
++#include "base/sequence_checker.h"
++#include "base/time/time.h"
++#include "url/gurl.h"
++
++// A local next-navigation model learned from the user's own link clicks.
++//
++// For every page it counts page views and the same-origin links followed from
++// that page, and estimates the probability that a link is followed next with a
++// smoothed first-order Markov estimate. Pages are keyed twice: by exact
++// origin + path, and by a template in which ID-like path segments are
++// wildcarded, so "/item/123" and "/item/456" share evidence. The exact estimate
++// is blended with the template one in proportion to how much exact evidence
++// exists, the back-off used by selective Markov models for web prediction
++// (Deshpande and Karypis, ACM TOIT 2004). States with too little support never
++// produce a prediction.
++//
++// The model replaces the remote ML preloading model that ungoogled-chromium
++// removes. It never leaves the profile directory and is cleared with history.
++class HyperionNavigationModel
++    : public base::ImportantFileWriter::DataSerializer {
++ public:
++  static constexpr base::FilePath::CharType kFileName[] =
++      FILE_PATH_LITERAL("Hyperion Navigation Model");
++
++  static constexpr size_t kMaxSources = 4000;
++  static constexpr size_t kMaxTargetsPerSource = 16;
++  // A link needs at least this many recorded clicks before it is predicted.
++  static constexpr uint32_t kMinClicks = 2;
++  // Counts are halved once a page has this many views, so old habits fade.
++  static constexpr uint32_t kSaturationViews = 512;
++
++  // An empty `profile_path` keeps the model in memory only.
++  explicit HyperionNavigationModel(const base::FilePath& profile_path);
++  HyperionNavigationModel(const HyperionNavigationModel&) = delete;
++  HyperionNavigationModel& operator=(const HyperionNavigationModel&) = delete;
++  ~HyperionNavigationModel() override;
++
++  void RecordView(const GURL& page);
++  void RecordClick(const GURL& page, const GURL& target);
++
++  // Probability in [0, 1] that `target` is the next navigation from `page`.
++  // Returns 0 when there is not enough evidence or the origins differ.
++  float Score(const GURL& page, const GURL& target) const;
++
++  void Clear();
++
++  bool loaded() const { return loaded_; }
++  size_t source_count_for_testing() const { return sources_.size(); }
++
++  static std::string ExactKey(const GURL& url);
++  static std::string TemplateKey(const GURL& url);
++
++  // base::ImportantFileWriter::DataSerializer:
++  std::optional<std::string> SerializeData() override;
++
++ private:
++  struct Source {
++    Source();
++    Source(const Source&);
++    Source& operator=(const Source&);
++    ~Source();
++
++    uint32_t views = 0;
++    base::Time last_used;
++    std::map<std::string, uint32_t> clicks;
++  };
++
++  // Increments the view or click counters of `key`, creating it if needed.
++  Source& Touch(const std::string& key);
++  void AddClick(Source& source, const std::string& target_key);
++  void EvictIfNeeded();
++  void ScheduleWrite();
++  void OnLoaded(std::optional<std::string> contents);
++
++  // Returns {views, clicks} for `target_key` under `source_key`.
++  std::pair<uint32_t, uint32_t> Counts(const std::string& source_key,
++                                       const std::string& target_key) const;
++
++  std::map<std::string, Source> sources_;
++  bool loaded_ = false;
++  std::unique_ptr<base::ImportantFileWriter> writer_;
++
++  SEQUENCE_CHECKER(sequence_checker_);
++  base::WeakPtrFactory<HyperionNavigationModel> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_NAVIGATION_PREDICTOR_HYPERION_NAVIGATION_MODEL_H_
+diff --git a/chrome/browser/navigation_predictor/hyperion_navigation_model_unittest.cc b/chrome/browser/navigation_predictor/hyperion_navigation_model_unittest.cc
+new file mode 100644
+index 0000000000..c7fb62ad6e
+--- /dev/null
++++ b/chrome/browser/navigation_predictor/hyperion_navigation_model_unittest.cc
+@@ -0,0 +1,138 @@
++// Copyright 2026 The Hyperion Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/navigation_predictor/hyperion_navigation_model.h"
++
++#include "base/files/scoped_temp_dir.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/test/task_environment.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "url/gurl.h"
++
++namespace {
++
++class HyperionNavigationModelTest : public testing::Test {
++ protected:
++  base::test::TaskEnvironment task_environment_;
++};
++
++const GURL kHome("https://news.test/");
++const GURL kStory("https://news.test/story/42#comments");
++const GURL kAbout("https://news.test/about");
++
++void Visit(HyperionNavigationModel& model,
++           const GURL& page,
++           const GURL& clicked) {
++  model.RecordView(page);
++  if (clicked.is_valid()) {
++    model.RecordClick(page, clicked);
++  }
++}
++
++TEST_F(HyperionNavigationModelTest, UnseenLinkScoresZero) {
++  HyperionNavigationModel model{base::FilePath()};
++  EXPECT_EQ(0.f, model.Score(kHome, kStory));
++  model.RecordView(kHome);
++  EXPECT_EQ(0.f, model.Score(kHome, kStory));
++}
++
++TEST_F(HyperionNavigationModelTest, NeedsTwoClicks) {
++  HyperionNavigationModel model{base::FilePath()};
++  Visit(model, kHome, kStory);
++  EXPECT_EQ(0.f, model.Score(kHome, kStory));
++  Visit(model, kHome, kStory);
++  // Two clicks in two views, smoothed: 2 / (2 + 2).
++  EXPECT_FLOAT_EQ(0.5f, model.Score(kHome, kStory));
++  // The fragment is not part of the target identity.
++  EXPECT_FLOAT_EQ(0.5f, model.Score(kHome, GURL("https://news.test/story/42")));
++}
++
++TEST_F(HyperionNavigationModelTest, ProbabilityTracksFollowRate) {
++  HyperionNavigationModel model{base::FilePath()};
++  for (int i = 0; i < 8; ++i) {
++    Visit(model, kHome, i % 4 == 0 ? kAbout : kStory);
++  }
++  float story = model.Score(kHome, kStory);
++  float about = model.Score(kHome, kAbout);
++  EXPECT_GT(story, about);
++  EXPECT_FLOAT_EQ(6.f / 10.f, story);
++  EXPECT_FLOAT_EQ(2.f / 10.f, about);
++}
++
++TEST_F(HyperionNavigationModelTest, IgnoresCrossOriginAndNonHttp) {
++  HyperionNavigationModel model{base::FilePath()};
++  const GURL other("https://other.test/story/42");
++  for (int i = 0; i < 3; ++i) {
++    Visit(model, kHome, other);
++  }
++  EXPECT_EQ(0.f, model.Score(kHome, other));
++  model.RecordView(GURL("file:///tmp/a.html"));
++  EXPECT_EQ(0.f,
++            model.Score(GURL("file:///tmp/a.html"), GURL("file:///tmp/b.html")));
++}
++
++TEST_F(HyperionNavigationModelTest, TemplateBackOffSharesEvidence) {
++  HyperionNavigationModel model{base::FilePath()};
++  for (int id = 100; id < 104; ++id) {
++    std::string item = "https://shop.test/item/" + base::NumberToString(id);
++    Visit(model, GURL(item), GURL(item + "/reviews"));
++  }
++  // An item page never seen before inherits the pattern from its template.
++  EXPECT_GT(model.Score(GURL("https://shop.test/item/999"),
++                        GURL("https://shop.test/item/999/reviews")),
++            0.5f);
++  EXPECT_EQ(0.f, model.Score(GURL("https://shop.test/item/999"),
++                             GURL("https://shop.test/cart")));
++}
++
++TEST_F(HyperionNavigationModelTest, TemplateKeys) {
++  EXPECT_EQ("https://a.test/item/*/reviews",
++            HyperionNavigationModel::TemplateKey(
++                GURL("https://a.test/item/123/reviews?x=1")));
++  EXPECT_EQ("https://a.test/blog/v2/post",
++            HyperionNavigationModel::TemplateKey(
++                GURL("https://a.test/blog/v2/post")));
++  EXPECT_EQ("https://a.test/u/*",
++            HyperionNavigationModel::TemplateKey(GURL(
++                "https://a.test/u/3f2504e0-4f89-11d3-9a0c-0305e82c3301")));
++}
++
++TEST_F(HyperionNavigationModelTest, ClearForgetsEverything) {
++  HyperionNavigationModel model{base::FilePath()};
++  Visit(model, kHome, kStory);
++  Visit(model, kHome, kStory);
++  ASSERT_GT(model.Score(kHome, kStory), 0.f);
++  model.Clear();
++  EXPECT_EQ(0.f, model.Score(kHome, kStory));
++  EXPECT_EQ(0u, model.source_count_for_testing());
++}
++
++TEST_F(HyperionNavigationModelTest, SourceCountIsBounded) {
++  HyperionNavigationModel model{base::FilePath()};
++  for (size_t i = 0; i < HyperionNavigationModel::kMaxSources + 50; ++i) {
++    model.RecordView(GURL("https://a.test/p" + base::NumberToString(i) + "x"));
++  }
++  EXPECT_LE(model.source_count_for_testing(),
++            HyperionNavigationModel::kMaxSources);
++}
++
++TEST_F(HyperionNavigationModelTest, PersistsAcrossRestarts) {
++  base::ScopedTempDir dir;
++  ASSERT_TRUE(dir.CreateUniqueTempDir());
++  {
++    HyperionNavigationModel model(dir.GetPath());
++    task_environment_.RunUntilIdle();
++    ASSERT_TRUE(model.loaded());
++    Visit(model, kHome, kStory);
++    Visit(model, kHome, kStory);
++  }
++  task_environment_.RunUntilIdle();
++  HyperionNavigationModel reloaded(dir.GetPath());
++  EXPECT_FALSE(reloaded.loaded());
++  task_environment_.RunUntilIdle();
++  ASSERT_TRUE(reloaded.loaded());
++  EXPECT_FLOAT_EQ(0.5f, reloaded.Score(kHome, kStory));
++}
++
++}  // namespace
+diff --git a/chrome/browser/navigation_predictor/navigation_predictor.cc b/chrome/browser/navigation_predictor/navigation_predictor.cc
+index 47a1796f0e..e9a26b43ff 100644
+--- a/chrome/browser/navigation_predictor/navigation_predictor.cc
++++ b/chrome/browser/navigation_predictor/navigation_predictor.cc
+@@ -16,6 +16,7 @@
+ #include "base/rand_util.h"
+ #include "base/system/sys_info.h"
+ #include "base/time/default_tick_clock.h"
++#include "chrome/browser/navigation_predictor/hyperion_navigation_model.h"
+ #include "chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h"
+ #include "chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.h"
+ #include "chrome/browser/preloading/preloading_prefs.h"
+@@ -39,6 +40,12 @@ namespace {
+ // The maximum number of clicks to track in a single navigation.
+ constexpr size_t kMaxClicksTracked = 10;
+ 
++// Hyperion navigation model: when to score a page's anchors, and how many of
++// the best-scoring links may be handed to the preloading decider per pass.
++constexpr base::TimeDelta kHyperionScoringDelays[] = {base::Milliseconds(300),
++                                                      base::Seconds(2)};
++constexpr size_t kHyperionMaxPredictionsPerPass = 2;
++
+ bool IsPrerendering(content::RenderFrameHost& render_frame_host) {
+   return render_frame_host.GetLifecycleState() ==
+          content::RenderFrameHost::LifecycleState::kPrerendering;
+@@ -330,6 +337,14 @@ void NavigationPredictor::ReportNewAnchorElements(
+                      std::forward_as_tuple(std::move(element), now));
+   }
+ 
++  if (!hyperion_view_recorded_) {
++    if (HyperionNavigationModel* model = GetHyperionNavigationModel()) {
++      model->RecordView(document_url);
++      hyperion_view_recorded_ = true;
++    }
++  }
++  ScheduleHyperionScoring();
++
+   for (uint32_t removed_element : removed_elements) {
+     AnchorId anchor_id(removed_element);
+     // Stop tracking removed elements to conserve memory. We leave an entry in
+@@ -438,6 +453,12 @@ void NavigationPredictor::ReportAnchorElementClick(
+ 
+   navigation_start_to_click_ = click->navigation_start_to_click;
+ 
++  if (HyperionNavigationModel* model = GetHyperionNavigationModel()) {
++    model->RecordClick(
++        render_frame_host().GetLastCommittedURL().GetWithoutRef(),
++        click->target_url);
++  }
++
+   clicked_count_++;
+   if (clicked_count_ > kMaxClicksTracked) {
+     return;
+@@ -741,6 +762,64 @@ void NavigationPredictor::ReportAnchorElementsEnteredViewport(
+   }
+ }
+ 
++HyperionNavigationModel* NavigationPredictor::GetHyperionNavigationModel()
++    const {
++  NavigationPredictorKeyedService* service =
++      NavigationPredictorKeyedServiceFactory::GetForProfile(
++          Profile::FromBrowserContext(render_frame_host().GetBrowserContext()));
++  return service ? service->navigation_model() : nullptr;
++}
++
++void NavigationPredictor::ScheduleHyperionScoring() {
++  if (!base::FeatureList::IsEnabled(
++          blink::features::kPreloadingHeuristicsMLModel) ||
++      hyperion_scoring_timer_.IsRunning() ||
++      hyperion_scoring_passes_ >=
++          static_cast<int>(std::size(kHyperionScoringDelays))) {
++    return;
++  }
++  hyperion_scoring_timer_.Start(
++      FROM_HERE, kHyperionScoringDelays[hyperion_scoring_passes_],
++      base::BindOnce(&NavigationPredictor::ScoreAnchorsWithHyperionModel,
++                     base::Unretained(this)));
++}
++
++void NavigationPredictor::ScoreAnchorsWithHyperionModel() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  hyperion_scoring_passes_++;
++  HyperionNavigationModel* model = GetHyperionNavigationModel();
++  if (!model) {
++    return;
++  }
++  const GURL document_url =
++      render_frame_host().GetLastCommittedURL().GetWithoutRef();
++  std::vector<std::pair<float, GURL>> scored;
++  std::set<size_t> seen;
++  for (const auto& [anchor_id, anchor] : anchors_) {
++    if (IsTargetURLTheSameAsDocument(anchor)) {
++      continue;
++    }
++    GURL target = anchor.target_url.GetWithoutRef();
++    if (!seen.insert(base::FastHash(target.spec())).second) {
++      continue;
++    }
++    float score = model->Score(document_url, target);
++    if (score > 0.f) {
++      scored.emplace_back(score, std::move(target));
++    }
++  }
++  std::ranges::sort(scored, std::ranges::greater(), &std::pair<float, GURL>::first);
++  if (scored.size() > kHyperionMaxPredictionsPerPass) {
++    scored.resize(kHyperionMaxPredictionsPerPass);
++  }
++  // The decider applies the prefetch threshold and only enacts predictions
++  // that match a moderate-eagerness speculation candidate on the page.
++  for (const auto& [score, url] : scored) {
++    render_frame_host().OnPreloadingHeuristicsModelDone(url, score);
++  }
++  ScheduleHyperionScoring();
++}
++
+ bool NavigationPredictor::IsTargetURLTheSameAsDocument(
+     const AnchorElementData& anchor) {
+   return render_frame_host().GetLastCommittedURL().EqualsIgnoringRef(
+diff --git a/chrome/browser/navigation_predictor/navigation_predictor.h b/chrome/browser/navigation_predictor/navigation_predictor.h
+index 5ea17b0cc6..e05efc735b 100644
+--- a/chrome/browser/navigation_predictor/navigation_predictor.h
++++ b/chrome/browser/navigation_predictor/navigation_predictor.h
+@@ -15,6 +15,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/tick_clock.h"
+ #include "base/time/time.h"
++#include "base/timer/timer.h"
+ #include "base/types/strong_alias.h"
+ #include "chrome/browser/navigation_predictor/navigation_predictor_metrics_document_data.h"
+ #include "chrome/browser/navigation_predictor/preloading_model_keyed_service.h"
+@@ -26,6 +27,8 @@
+ #include "third_party/blink/public/mojom/loader/navigation_predictor.mojom.h"
+ #include "url/origin.h"
+ 
++class HyperionNavigationModel;
++
+ namespace content {
+ class RenderFrameHost;
+ }  // namespace content
+@@ -104,6 +107,14 @@ class NavigationPredictor
+ 
+   void OnMLModelExecutionTimerFired();
+ 
++  // Hyperion: local next-navigation model. Pages report anchors before the
++  // browser-injected speculation rules exist, and the preloading decider only
++  // enacts a prediction for which a candidate is already registered, so the
++  // anchors are scored twice: shortly after they appear and again later.
++  HyperionNavigationModel* GetHyperionNavigationModel() const;
++  void ScheduleHyperionScoring();
++  void ScoreAnchorsWithHyperionModel();
++
+   // Computes and stores document level metrics, including |number_of_anchors_|
+   // etc.
+   void ComputeDocumentMetricsOnLoad(
+@@ -195,6 +206,10 @@ class NavigationPredictor
+ 
+   base::OneShotTimer ml_model_execution_timer_;
+ 
++  bool hyperion_view_recorded_ = false;
++  int hyperion_scoring_passes_ = 0;
++  base::OneShotTimer hyperion_scoring_timer_;
++
+   ModelScoreCallbackForTesting model_score_callback_;
+ 
+   SEQUENCE_CHECKER(sequence_checker_);
+diff --git a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.cc b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.cc
+index 60442d4048..f0ad0c82a5 100644
+--- a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.cc
++++ b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.cc
+@@ -12,7 +12,9 @@
+ #include "base/time/default_tick_clock.h"
+ #include "base/values.h"
+ #include "build/build_config.h"
++#include "chrome/browser/history/history_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "components/keyed_service/core/service_access_type.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/render_frame_host.h"
+@@ -117,10 +119,19 @@ NavigationPredictorKeyedService::Prediction::web_contents() const {
+ 
+ NavigationPredictorKeyedService::NavigationPredictorKeyedService(
+     content::BrowserContext* browser_context)
+-    : search_engine_preconnector_(browser_context) {
++    : search_engine_preconnector_(browser_context),
++      navigation_model_(std::make_unique<HyperionNavigationModel>(
++          browser_context->GetPath())) {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+   DCHECK(!browser_context->IsOffTheRecord());
+ 
++  if (history::HistoryService* history_service =
++          HistoryServiceFactory::GetForProfile(
++              Profile::FromBrowserContext(browser_context),
++              ServiceAccessType::IMPLICIT_ACCESS)) {
++    history_observation_.Observe(history_service);
++  }
++
+ #if !BUILDFLAG(IS_ANDROID)
+   if (!SearchEnginePreconnector::ShouldBeEnabledAsKeyedService()) {
+     // Start preconnecting to the search engine.
+@@ -176,3 +187,16 @@ NavigationPredictorKeyedService::search_engine_preconnector() {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+   return &search_engine_preconnector_;
+ }
++
++void NavigationPredictorKeyedService::OnHistoryDeletions(
++    history::HistoryService* history_service,
++    const history::DeletionInfo& deletion_info) {
++  // The model is derived from browsing history, so any history deletion clears
++  // it entirely rather than trying to unlearn individual visits.
++  navigation_model_->Clear();
++}
++
++void NavigationPredictorKeyedService::HistoryServiceBeingDeleted(
++    history::HistoryService* history_service) {
++  history_observation_.Reset();
++}
+diff --git a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h
+index 2f0c39c85a..d12cc61e5e 100644
+--- a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h
++++ b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h
+@@ -16,6 +16,10 @@
+ #include "chrome/browser/navigation_predictor/search_engine_preconnector.h"
+ #include "components/keyed_service/core/keyed_service.h"
+ #include "url/gurl.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/navigation_predictor/hyperion_navigation_model.h"
++#include "components/history/core/browser/history_service.h"
++#include "components/history/core/browser/history_service_observer.h"
+ 
+ namespace content {
+ class BrowserContext;
+@@ -24,7 +28,8 @@ class WebContents;
+ 
+ // Keyed service that can be used to receive notifications about the URLs for
+ // the next predicted navigation.
+-class NavigationPredictorKeyedService : public KeyedService {
++class NavigationPredictorKeyedService : public KeyedService,
++                                        public history::HistoryServiceObserver {
+  public:
+   // Indicates how the set of next navigation URLs were predicted.
+   enum class PredictionSource {
+@@ -119,6 +124,15 @@ class NavigationPredictorKeyedService : public KeyedService {
+   // Removes |observer| as the observer for next predicted navigation.
+   void RemoveObserver(Observer* observer);
+ 
++  // Hyperion: the user's local next-navigation model.
++  HyperionNavigationModel* navigation_model() { return navigation_model_.get(); }
++
++  // history::HistoryServiceObserver:
++  void OnHistoryDeletions(history::HistoryService* history_service,
++                          const history::DeletionInfo& deletion_info) override;
++  void HistoryServiceBeingDeleted(
++      history::HistoryService* history_service) override;
++
+  private:
+   // List of observers are currently registered to receive notifications for the
+   // next predicted navigations.
+@@ -129,6 +143,11 @@ class NavigationPredictorKeyedService : public KeyedService {
+ 
+   // Manages preconnecting to the user's default search engine.
+   SearchEnginePreconnector search_engine_preconnector_;
++
++  std::unique_ptr<HyperionNavigationModel> navigation_model_;
++  base::ScopedObservation<history::HistoryService,
++                          history::HistoryServiceObserver>
++      history_observation_{this};
+ };
+ 
+ #endif  // CHROME_BROWSER_NAVIGATION_PREDICTOR_NAVIGATION_PREDICTOR_KEYED_SERVICE_H_
+diff --git a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.cc b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.cc
+index 892450366c..b25e8c3426 100644
+--- a/chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.cc
++++ b/chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/navigation_predictor/navigation_predictor_keyed_service_factory.h"
+ 
++#include "chrome/browser/history/history_service_factory.h"
+ #include "chrome/browser/navigation_predictor/navigation_predictor_keyed_service.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "content/public/browser/browser_context.h"
+@@ -39,7 +40,9 @@ NavigationPredictorKeyedServiceFactory::NavigationPredictorKeyedServiceFactory()
+               // TODO(crbug.com/41488885): Check if this service is needed for
+               // Ash Internals.
+               .WithAshInternals(ProfileSelection::kOriginalOnly)
+-              .Build()) {}
++              .Build()) {
++  DependsOn(HistoryServiceFactory::GetInstance());
++}
+ 
+ NavigationPredictorKeyedServiceFactory::
+     ~NavigationPredictorKeyedServiceFactory() = default;
+diff --git a/content/browser/preloading/preloading_decider.cc b/content/browser/preloading/preloading_decider.cc
+index fab5c8838f..2a751dd7c2 100644
+--- a/content/browser/preloading/preloading_decider.cc
++++ b/content/browser/preloading/preloading_decider.cc
+@@ -313,7 +313,8 @@ void PreloadingDecider::OnPreloadingHeuristicsModelDone(const GURL& url,
+     return;
+   }
+ 
+-  ml_model_available_ = true;
++  // Hyperion: the local navigation model predicts only a few links per page,
++  // so it supplements the hover heuristic rather than superseding it.
+ 
+   const PreloadingConfidence confidence{std::clamp(
+       base::saturated_cast<int>(std::nearbyint(score * 100.f)), 0, 100)};
+diff --git a/third_party/blink/common/features.cc b/third_party/blink/common/features.cc
+index c2468e1458..71df5decb4 100644
+--- a/third_party/blink/common/features.cc
++++ b/third_party/blink/common/features.cc
+@@ -1836,7 +1836,7 @@ BASE_FEATURE_PARAM(base::TimeDelta,
+ BASE_FEATURE(kSpeculationRulesRendererSideHeuristics,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+-BASE_FEATURE(kPreloadingHeuristicsMLModel, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kPreloadingHeuristicsMLModel, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(int,
+                    kPreloadingModelTimerStartDelay,
+                    &kPreloadingHeuristicsMLModel,
+@@ -1858,12 +1858,12 @@ BASE_FEATURE_PARAM(bool,
+                    kPreloadingModelEnactCandidates,
+                    &kPreloadingHeuristicsMLModel,
+                    "enact_candidates",
+-                   false);
++                   true);
+ BASE_FEATURE_PARAM(int,
+                    kPreloadingModelPrefetchModerateThreshold,
+                    &kPreloadingHeuristicsMLModel,
+                    "prefetch_moderate_threshold",
+-                   50);
++                   35);
+ BASE_FEATURE_PARAM(int,
+                    kPreloadingModelPrerenderModerateThreshold,
+                    &kPreloadingHeuristicsMLModel,

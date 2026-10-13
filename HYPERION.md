@@ -16,6 +16,7 @@ GitHub Actions only (`Build macOS binaries of Helium`, arm64 only); nothing comp
 | `loading-predictors` | The LCP Critical Path Predictor family plus desktop subresource prefetch from the loading predictor: learns each site's critical resources and fetches them before the parser finds them. |
 | `speculation-inject` | Built-in speculation rules for pages that ship none: same-origin prefetch on hover, prerender on pointerdown, with action-like paths excluded. |
 | `cache-content-addressed` | New code. Cached JS, CSS, font and image responses whose file name carries a bundler content hash (`app.3f9a1c7e.js`) are treated as fresh for 30 days even when the server sends a short `max-age` or `must-revalidate`, in both the HTTP cache and Blink's memory cache. Removes revalidation round trips that can only return 304. `no-cache` and `no-store` are still honored. Unit-tested. |
+| `navigation-model` | New code. A local next-navigation model replacing the remote ML preloading model ungoogled-chromium removes: a smoothed first-order Markov model of the links you follow from each page, with back-off to a URL template (`/item/*`), learned from your own clicks, stored in the profile, cleared with history. Links it is confident about are prefetched as soon as the page settles, before hover. Unit-tested. |
 
 Research basis, measurements and sources: [docs/hyperion-network.md](docs/hyperion-network.md).
 

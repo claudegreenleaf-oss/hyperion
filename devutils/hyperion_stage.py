@@ -112,14 +112,18 @@ def stage(paths, upto):
                 applied += 1
         work = STAGE / 'work' / path
         work.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(dst, work)
+        if dst.exists():
+            shutil.copyfile(dst, work)
+        else:
+            work.unlink(missing_ok=True)  # created by the patch being written
         print(f'{path}: {applied} patches applied -> .stage/work/{path}')
 
 
 def diff(paths):
     for path in paths:
-        a = (STAGE / 'base' / path).read_text().splitlines(keepends=True)
-        b = (STAGE / 'work' / path).read_text().splitlines(keepends=True)
+        base, work = STAGE / 'base' / path, STAGE / 'work' / path
+        a = base.read_text().splitlines(keepends=True) if base.exists() else []
+        b = work.read_text().splitlines(keepends=True) if work.exists() else []
         sys.stdout.writelines(
             difflib.unified_diff(a, b, f'a/{path}', f'b/{path}', n=3))
 
