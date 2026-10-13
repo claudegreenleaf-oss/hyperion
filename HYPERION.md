@@ -11,6 +11,12 @@ GitHub Actions only (`Build macOS binaries of Helium`, arm64 only); nothing comp
 | --- | --- |
 | `hwconcurrency-revert` | Helium randomizes `navigator.hardwareConcurrency` downward (a 10-core M4 reports 6, 8 or 10), so multithreaded web apps size their worker pools too small. Default flipped to off; the flag still exists. |
 | `ublock-allow-prefetch` | Bundled uBlock Origin ships with "Disable pre-fetching" ticked, which turns off Chromium's network prediction and with it speculation rules (prefetch and prerender). Default flipped to off. |
+| `preload-pages-standard` | Helium inherits a "Preload pages: off" default that disables preconnect, the loading predictor and speculation rules. Restored to Chrome's Standard. |
+| `net-finch-parity` | DNS and connection setup features Chrome enables through Finch, which Helium removes: optimistic (stale) DNS, intermediate DNS results, RTT-scaled Happy Eyeballs and QUIC race timers, early cookie load, session caches kept under memory pressure. Handshake bytes unchanged. |
+| `loading-predictors` | The LCP Critical Path Predictor family plus desktop subresource prefetch from the loading predictor: learns each site's critical resources and fetches them before the parser finds them. |
+| `speculation-inject` | Built-in speculation rules for pages that ship none: same-origin prefetch on hover, prerender on pointerdown, with action-like paths excluded. |
+
+Research basis, measurements and sources: [docs/hyperion-network.md](docs/hyperion-network.md).
 
 ## Not needed
 

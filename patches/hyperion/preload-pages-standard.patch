@@ -1,0 +1,11 @@
+--- a/chrome/browser/preloading/preloading_prefs.h
++++ b/chrome/browser/preloading/preloading_prefs.h
+@@ -23,7 +23,7 @@
+   kWifiOnlyDeprecated = 1,
+   kDisabled = 2,
+   kExtended = 3,
+-  kDefault = kDisabled,
++  kDefault = kStandard,
+ };
+ 
+ // Enum representing possible values of the Preload Pages opt-in state. These

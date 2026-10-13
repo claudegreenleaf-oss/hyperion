@@ -1,0 +1,113 @@
+--- a/net/base/features.cc
++++ b/net/base/features.cc
+@@ -50,11 +50,11 @@
+ #endif
+ );
+ 
+-BASE_FEATURE(kOptimisticDnsForTcp, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kOptimisticDnsForTcp, base::FEATURE_ENABLED_BY_DEFAULT);
+ const base::FeatureParam<bool> kUseStaleConnectorsForOptimisticDns{
+-    &kOptimisticDnsForTcp, "use_stale_connectors", false};
+-
+-BASE_FEATURE(kOptimisticDnsForQuic, base::FEATURE_DISABLED_BY_DEFAULT);
++    &kOptimisticDnsForTcp, "use_stale_connectors", true};
++
++BASE_FEATURE(kOptimisticDnsForQuic, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kAddressSorterConnectCache, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+@@ -129,21 +129,21 @@
+ 
+ BASE_FEATURE(kHappyEyeballsV3, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+-BASE_FEATURE(kEnableIntermediateDnsResults, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kEnableIntermediateDnsResults, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(bool,
+                    kEnableIntermediateDnsResultsSortTransactionsIndividually,
+                    &kEnableIntermediateDnsResults,
+                    true);
+ 
+-BASE_FEATURE(kAdjustIPv6FallbackTime, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAdjustIPv6FallbackTime, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(base::TimeDelta,
+                    kIPv6FallbackTime,
+                    &kAdjustIPv6FallbackTime,
+                    "fallback_time",
+-                   TcpConnectJob::kIPv6FallbackTime);
+-
+-BASE_FEATURE(kIPv6FallbackBasedOnRTT, base::FEATURE_DISABLED_BY_DEFAULT);
++                   base::Milliseconds(100));
++
++BASE_FEATURE(kIPv6FallbackBasedOnRTT, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(double,
+                    kIPv6FallbackRTTMultiplier,
+@@ -355,21 +355,21 @@
+ 
+ // A flag to use QuicSessionPool::AsyncDnsJob, which resolves hostnames with
+ // HostResolver::ServiceEndpointRequest, for direct QUIC sessions.
+-BASE_FEATURE(kAsyncDnsQuicJob, base::FEATURE_DISABLED_BY_DEFAULT);
+-
+-BASE_FEATURE_PARAM(bool, kAsyncDnsQuicJobFastFail, &kAsyncDnsQuicJob, false);
++BASE_FEATURE(kAsyncDnsQuicJob, base::FEATURE_ENABLED_BY_DEFAULT);
++
++BASE_FEATURE_PARAM(bool, kAsyncDnsQuicJobFastFail, &kAsyncDnsQuicJob, true);
+ BASE_FEATURE_PARAM(bool,
+                    kAsyncDnsQuicJobSortTransactionsIndividually,
+                    &kAsyncDnsQuicJob,
+                    true);
+ 
+-BASE_FEATURE(kAdjustQuicSlowTimerDelay, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAdjustQuicSlowTimerDelay, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(base::TimeDelta,
+                    kQuicSlowTimerDelay,
+                    &kAdjustQuicSlowTimerDelay,
+-                   TcpConnectJob::kIPv6FallbackTime);
+-
+-BASE_FEATURE(kQuicSlowTimerBasedOnRTT, base::FEATURE_DISABLED_BY_DEFAULT);
++                   base::Milliseconds(100));
++
++BASE_FEATURE(kQuicSlowTimerBasedOnRTT, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(double,
+                    kQuicSlowTimerRTTMultiplier,
+                    &kQuicSlowTimerBasedOnRTT,
+@@ -966,7 +966,7 @@
+ const base::FeatureParam<bool> kSQLitePersistentCookieStoreEarlyInitCheckDisk{
+     &kSQLitePersistentCookieStoreEarlyInit, "check_disk", true};
+ 
+-BASE_FEATURE(kEarlyCookieLoadOnPreconnect, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kEarlyCookieLoadOnPreconnect, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kEnableErrorCodePropagationForPreconnect,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -977,13 +977,13 @@
+ BASE_FEATURE(kLocalNetworkPermissionCheck, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kIgnoreQuicCryptoConfigMemoryPressure,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kIgnoreQuicCryptoConfigMemoryPressureForDoh,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kIgnoreMemoryPressureForSslClientSessionCache,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kCookieParseRejectEmptyNameAmbiguous,
+              base::FEATURE_ENABLED_BY_DEFAULT);
+@@ -1080,11 +1080,11 @@
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ #endif
+ 
+-BASE_FEATURE(kQuicSocketSendBufferSize, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kQuicSocketSendBufferSize, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(int,
+                    kQuicSocketSendBufferSizeParam,
+                    &kQuicSocketSendBufferSize,
+-                   -1);
++                   1048576);
+ 
+ }  // namespace net::features
+ 

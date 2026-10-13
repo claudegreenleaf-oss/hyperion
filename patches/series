@@ -27,3 +27,7 @@ helium/macos/fix-history-swiper-lifetime.patch
 
 hyperion/hwconcurrency-revert.patch
 hyperion/ublock-allow-prefetch.patch
+hyperion/preload-pages-standard.patch
+hyperion/net-finch-parity.patch
+hyperion/loading-predictors.patch
+hyperion/speculation-inject.patch

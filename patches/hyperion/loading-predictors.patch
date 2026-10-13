@@ -1,0 +1,115 @@
+--- a/third_party/blink/common/features.cc
++++ b/third_party/blink/common/features.cc
+@@ -197,7 +197,7 @@
+ #endif
+ 
+ // https://crbug.com/1472970
+-BASE_FEATURE(kAutoSpeculationRules, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kAutoSpeculationRules, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(bool,
+                    kAutoSpeculationRulesHoldback,
+                    &kAutoSpeculationRules,
+@@ -923,13 +923,13 @@
+                    "limit",
+                    0x10000000);
+ 
+-BASE_FEATURE(kLCPCriticalPathPredictor, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPCriticalPathPredictor, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(bool,
+                    kLCPCriticalPathAdjustImageLoadPriority,
+                    &kLCPCriticalPathPredictor,
+                    "lcpp_adjust_image_load_priority",
+-                   false);
++                   true);
+ 
+ BASE_FEATURE_PARAM(size_t,
+                    kLCPCriticalPathPredictorMaxElementLocatorLength,
+@@ -979,7 +979,7 @@
+     kLCPCriticalPathPredictorImageLoadPriorityEnabledForHTMLImageElement,
+     &kLCPCriticalPathPredictor,
+     "lcpp_enable_image_load_priority_for_htmlimageelement",
+-    false);
++    true);
+ 
+ BASE_FEATURE_PARAM(int,
+                    kLCPCriticalPathPredictorMaxHostsToTrack,
+@@ -1045,7 +1045,7 @@
+                    "lcpscriptobserver_max_histogram_buckets",
+                    10);
+ 
+-BASE_FEATURE(kLCPTimingPredictorPrerender2, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPTimingPredictorPrerender2, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(int,
+                    kLCPTimingPredictorSlidingWindowSize,
+@@ -1059,7 +1059,7 @@
+                    "lcp_timing_predictor_max_histogram_buckets",
+                    10);
+ 
+-BASE_FEATURE(kLCPPAutoPreconnectLcpOrigin, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPPAutoPreconnectLcpOrigin, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(double,
+                    kLCPPAutoPreconnectFrequencyThreshold,
+@@ -1091,7 +1091,7 @@
+                    "lcpp_preconnect_record_all_origins",
+                    false);
+ 
+-BASE_FEATURE(kLCPPDeferUnusedPreload, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPPDeferUnusedPreload, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ const base::FeatureParam<LcppDeferUnusedPreloadExcludedResourceType>::Option
+     lcpp_defer_unused_preload_excluded_resource_type[] = {
+@@ -1158,7 +1158,7 @@
+                    "lcpp_unused_preload_max_histogram_buckets",
+                    10);
+ 
+-BASE_FEATURE(kLCPPFontURLPredictor, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPPFontURLPredictor, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(size_t,
+                    kLCPPFontURLPredictorMaxUrlLength,
+@@ -1299,11 +1299,11 @@
+                    "lcpp_multiple_key_max_histogram_buckets",
+                    10);
+ 
+-BASE_FEATURE(kLCPPPrefetchSubresource, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kLCPPPrefetchSubresource, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kLCPPPrefetchSubresourceAsync, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+-BASE_FEATURE(kHttpDiskCachePrewarming, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kHttpDiskCachePrewarming, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE_PARAM(size_t,
+                    kHttpDiskCachePrewarmingMaxUrlLength,
+@@ -1901,7 +1901,7 @@
+     "acceptable_percent_of_system_memory";
+ 
+ BASE_FEATURE(kPrerender2EarlyDocumentLifecycleUpdate,
+-             base::FEATURE_DISABLED_BY_DEFAULT);
++             base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kProcessHtmlDataImmediately, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+--- a/chrome/browser/predictors/predictors_features.cc
++++ b/chrome/browser/predictors/predictors_features.cc
+@@ -48,7 +48,7 @@
+              base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+ constexpr base::FeatureState kLoadingPredictorPrefetchDefaultFeatureState =
+-    kFeatureEnabledOnlyOnAndroid;
++    base::FEATURE_ENABLED_BY_DEFAULT;
+ 
+ // Modifies loading predictor so that it does prefetches of subresources instead
+ // of preconnects.
+@@ -69,7 +69,7 @@
+ const base::FeatureParam<PrefetchSubresourceType>
+     kLoadingPredictorPrefetchSubresourceType{
+         &kLoadingPredictorPrefetch, "subresource_type",
+-        PrefetchSubresourceType::kAll, &kPrefetchSubresourceTypeParamOptions};
++        PrefetchSubresourceType::kJsAndCss, &kPrefetchSubresourceTypeParamOptions};
+ 
+ bool ShouldUseLocalPredictions() {
+   return base::FeatureList::IsEnabled(kLoadingPredictorUseLocalPredictions);

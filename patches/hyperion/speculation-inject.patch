@@ -1,0 +1,25 @@
+--- a/third_party/blink/renderer/core/speculation_rules/auto_speculation_rules_config.cc
++++ b/third_party/blink/renderer/core/speculation_rules/auto_speculation_rules_config.cc
+@@ -110,13 +110,21 @@
+   }
+ }
+ 
++// Hyperion: with no field trial config, every https page that ships no
++// speculation rules of its own gets same-origin prefetch on hover and
++// prerender on pointerdown. Paths that commonly perform actions on GET
++// (log out, delete, unsubscribe, cart) and downloads are excluded.
++constexpr char kHyperionDefaultConfig[] =
++    R"json({"url_match_pattern_to_speculation_rules":{"https://*":"{\"prefetch\":[{\"source\":\"document\",\"eagerness\":\"moderate\",\"where\":{\"and\":[{\"href_matches\":\"/*\"},{\"not\":{\"href_matches\":[\"/*logout*\",\"/*log-out*\",\"/*signout*\",\"/*sign-out*\",\"/*sign_out*\",\"/*logoff*\",\"/*delete*\",\"/*remove*\",\"/*unsubscribe*\",\"/*cart*\",\"/*checkout*\",\"/*.pdf\",\"/*.zip\"]}},{\"not\":{\"selector_matches\":\"[rel~=nofollow], [download], [target=_blank]\"}}]}}],\"prerender\":[{\"source\":\"document\",\"eagerness\":\"conservative\",\"where\":{\"and\":[{\"href_matches\":\"/*\"},{\"not\":{\"href_matches\":[\"/*logout*\",\"/*log-out*\",\"/*signout*\",\"/*sign-out*\",\"/*sign_out*\",\"/*logoff*\",\"/*delete*\",\"/*remove*\",\"/*unsubscribe*\",\"/*cart*\",\"/*checkout*\",\"/*.pdf\",\"/*.zip\"]}},{\"not\":{\"selector_matches\":\"[rel~=nofollow], [download], [target=_blank]\"}}]}}]}"}})json";
++
+ const AutoSpeculationRulesConfig& AutoSpeculationRulesConfig::GetInstance() {
+   CHECK(base::FeatureList::IsEnabled(features::kAutoSpeculationRules));
+ 
+   DEFINE_STATIC_LOCAL(
+       AutoSpeculationRulesConfig, instance,
+       (String::FromUtf8(base::GetFieldTrialParamByFeatureAsString(
+-          features::kAutoSpeculationRules, "config", "{}"))));
++          features::kAutoSpeculationRules, "config",
++          kHyperionDefaultConfig))));
+ 
+   if (g_override) {
+     return *g_override;
