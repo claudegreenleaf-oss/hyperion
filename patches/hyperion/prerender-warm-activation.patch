@@ -1,0 +1,94 @@
+--- a/content/browser/preloading/prerenderer_impl.cc
++++ b/content/browser/preloading/prerenderer_impl.cc
+@@ -34,6 +34,11 @@
+ namespace content {
+ 
+ namespace {
++
++// Minimum PreloadingConfidence (0 to 100) at which a non-immediate prerender
++// is treated as a likely activation and warmed. Pointer triggers report 100.
++constexpr int kHyperionWarmMinConfidence = 50;
++
+ PreloadingType ConvertSpeculationActionToPreloadingType(
+     blink::mojom::SpeculationAction action) {
+   switch (action) {
+@@ -471,10 +476,21 @@
+         candidate->no_vary_search_hint);
+   }
+ 
+-  const bool should_warm_up_compositor = base::FeatureList::IsEnabled(
+-      IsImmediateSpeculationEagerness(candidate->eagerness)
+-          ? features::kPrerender2WarmUpCompositorForImmediate
+-          : features::kPrerender2WarmUpCompositorForNonImmediate);
++  // Hyperion: a non-immediate candidate fires on pointer intent or a confident
++  // navigation-model prediction, so it usually activates within a second.
++  // Give it what omnibox and search prerenders already get: a compositor that
++  // starts producing frames before activation, and a paint tree dry-run at
++  // DOMContentLoaded that activation reuses. Immediate candidates stay cold,
++  // since most of them are never activated.
++  const bool hyperion_likely_activation =
++      !IsImmediateSpeculationEagerness(candidate->eagerness) &&
++      confidence.value() >= kHyperionWarmMinConfidence;
++  const bool should_warm_up_compositor =
++      hyperion_likely_activation ||
++      base::FeatureList::IsEnabled(
++          IsImmediateSpeculationEagerness(candidate->eagerness)
++              ? features::kPrerender2WarmUpCompositorForImmediate
++              : features::kPrerender2WarmUpCompositorForNonImmediate);
+ 
+   // `SpeculationCandidate::tags` must never be empty: rules that specify no
+   // tags carry a single null tag instead (see blink.mojom).
+@@ -502,7 +518,8 @@
+           ? ui::PAGE_TRANSITION_FORM_SUBMIT
+           : ui::PAGE_TRANSITION_LINK,
+       should_warm_up_compositor,
+-      /*should_prepare_paint_tree=*/false, candidate->action,
++      /*should_prepare_paint_tree=*/hyperion_likely_activation,
++      candidate->action,
+       /*url_match_predicate=*/{},
+       /*prerender_navigation_handle_callback=*/{},
+       PreloadPipelineInfoImpl::Create(
+--- a/content/browser/preloading/prerenderer_impl_unittest.cc
++++ b/content/browser/preloading/prerenderer_impl_unittest.cc
+@@ -142,6 +142,41 @@
+   EXPECT_TRUE(registry->FindHostByUrlForTesting(kPrerenderingUrl));
+ }
+ 
++// Tests that a non-immediate prerender with high confidence gets a warmed
++// compositor and a pre-built paint tree, while low-confidence and immediate
++// prerenders stay cold.
++TEST_F(PrerendererTest, HyperionWarmsLikelyActivations) {
++  PrerenderHostRegistry* registry = GetPrerenderHostRegistry();
++  PrerendererImpl prerenderer(*GetRenderFrameHost());
++
++  const GURL kHoverUrl = GetSameOriginUrl("/empty.html?hover");
++  prerenderer.MaybePrerender(
++      CreatePrerenderCandidateWithEagerness(
++          kHoverUrl, blink::mojom::SpeculationEagerness::kModerate),
++      preloading_predictor::kUnspecified, PreloadingConfidence{100});
++  PrerenderHost* hover = registry->FindHostByUrlForTesting(kHoverUrl);
++  ASSERT_TRUE(hover);
++  EXPECT_TRUE(hover->should_warm_up_compositor());
++  EXPECT_TRUE(hover->should_prepare_paint_tree());
++
++  const GURL kUnsureUrl = GetSameOriginUrl("/empty.html?unsure");
++  prerenderer.MaybePrerender(
++      CreatePrerenderCandidateWithEagerness(
++          kUnsureUrl, blink::mojom::SpeculationEagerness::kModerate),
++      preloading_predictor::kUnspecified, PreloadingConfidence{20});
++  PrerenderHost* unsure = registry->FindHostByUrlForTesting(kUnsureUrl);
++  ASSERT_TRUE(unsure);
++  EXPECT_FALSE(unsure->should_prepare_paint_tree());
++
++  const GURL kImmediateUrl = GetSameOriginUrl("/empty.html?immediate");
++  std::vector<blink::mojom::SpeculationCandidatePtr> candidates;
++  candidates.push_back(CreatePrerenderCandidate(kImmediateUrl));
++  prerenderer.ProcessCandidatesForPrerender(std::move(candidates));
++  PrerenderHost* immediate = registry->FindHostByUrlForTesting(kImmediateUrl);
++  ASSERT_TRUE(immediate);
++  EXPECT_FALSE(immediate->should_prepare_paint_tree());
++}
++
+ // Tests that Prerenderer should not start prerendering when
+ // kLCPTimingPredictorPrerender2 is enabled and until OnLCPPredicted is called.
+ TEST_F(PrerendererTest, LCPTimingPredictorPrerender2) {
