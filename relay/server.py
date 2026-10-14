@@ -14,7 +14,9 @@ import gzip
 import json
 import os
 import re
+import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from urllib.parse import urlsplit
 
@@ -42,7 +44,7 @@ UA = (
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain", "application/pdf")
 
 # Extraction is CPU-bound and the box is shared with SCOTUS prod, so cap concurrency.
-EXTRACT_SLOTS = asyncio.Semaphore(2)
+EXTRACT_SLOTS = asyncio.Semaphore(3)
 
 
 class TTLCache:
@@ -82,13 +84,19 @@ client = httpx.AsyncClient(
 )
 
 
+TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
 def _extract(html: str, url: str) -> tuple[str, str]:
+    # fast=True skips trafilatura's fallback extractors: identical text on the pages measured,
+    # 1.3 to 3x faster. The title comes from <title> rather than a second full metadata parse.
     text = trafilatura.extract(
-        html, url=url, output_format="markdown", include_comments=False,
-        include_tables=True, include_images=False, include_links=False, deduplicate=True,
+        html, url=url, output_format="markdown", include_comments=False, include_tables=True,
+        include_images=False, include_links=False, deduplicate=True, fast=True,
     ) or ""
-    meta = trafilatura.extract_metadata(html, default_url=url)
-    return text, (meta.title if meta and meta.title else "")
+    m = TITLE.search(html, 0, 200000)
+    title = lxml.html.fromstring(m.group(1)).text_content().strip() if m and m.group(1).strip() else ""
+    return text, title
 
 
 BLOCKED = (403, 429, 503)
@@ -120,7 +128,16 @@ async def _get_browserlike(url):
         return r.status_code, r.headers, body, str(r.url), len(r.content)
 
 
+# PDFium is not thread-safe; two extraction threads inside it at once segfault the process.
+PDFIUM_LOCK = threading.Lock()
+
+
 def _pdf_text(data: bytes) -> str:
+    with PDFIUM_LOCK:
+        return _pdf_text_locked(data)
+
+
+def _pdf_text_locked(data: bytes) -> str:
     doc = pdfium.PdfDocument(data)
     try:
         parts = []
@@ -169,6 +186,32 @@ async def _stack_exchange(url):
             "wire_bytes": len(q.content) + len(a.content), "via": "stackexchange-api"}
 
 
+WIKI_PAGE = re.compile(r"^([a-z\-]+)\.(?:m\.)?wikipedia\.org$")
+API_UA = "hyperion-relay/0.1 (https://github.com/claudegreenleaf-oss/hyperion)"
+
+
+async def _wikipedia(url):
+    # The extracts API returns the article as plain text: about 0.3 s, against about 2 s to
+    # fetch and extract a long article's HTML.
+    u = urlsplit(url)
+    m = WIKI_PAGE.match(u.netloc.lower())
+    if not m or not u.path.startswith("/wiki/") or u.query:
+        return None
+    title = urllib.parse.unquote(u.path[len("/wiki/"):])
+    if not title or ":" in title:
+        return None
+    r = await client.get(f"https://{m.group(1)}.wikipedia.org/w/api.php", headers={"User-Agent": API_UA}, params={
+        "action": "query", "prop": "extracts", "explaintext": 1, "redirects": 1, "titles": title, "format": "json"})
+    if r.status_code != 200:
+        return None
+    page = next(iter(r.json().get("query", {}).get("pages", {}).values()), {})
+    text = page.get("extract") or ""
+    if not text:
+        return None
+    return {"title": page.get("title", title), "text": text, "status": 200, "final_url": url,
+            "wire_bytes": len(r.content), "via": "wikipedia-api"}
+
+
 async def _from_worker(url):
     async with httpx.AsyncClient(timeout=20, headers={"Accept-Encoding": "zstd, gzip"}) as c:
         r = await c.post(f"{WORKER}/v1/fetch", json={"urls": [url], "max_chars": 200000, "deadline_ms": 15000})
@@ -204,7 +247,7 @@ async def _load(url: str) -> dict:
     t0 = time.monotonic()
     rec = {"url": url}
     try:
-        adapted = await _stack_exchange(url)
+        adapted = await _stack_exchange(url) or await _wikipedia(url)
         if adapted:
             rec.update(adapted)
         else:
@@ -256,28 +299,15 @@ async def _pages(urls, deadline_s, max_chars, use_cache=True):
     for u, t in tasks.items():
         # asyncio.wait does not cancel, so a page past the deadline keeps loading into the cache.
         out[u] = t.result() if t.done() else {"url": u, "error": "still loading at deadline; fetch again shortly"}
-    result = []
-    for u in urls:
-        r = dict(out[u])
-        text = r.get("text") or ""
-        r["chars"] = len(text)
-        if len(text) > max_chars:
-            r["text"] = text[:max_chars]
-            r["truncated"] = True
-        result.append(r)
-    return result
+    return [_clip(out[u], max_chars) for u in urls]
 
 
-async def _search(q: str, n: int, use_cache=True):
-    key = (q, n)
-    hit = searches.get(key) if use_cache else None
-    if hit is not None:
-        return hit, True
-    r = await client.get(f"{SEARXNG}/search", params={"q": q, "format": "json", "language": "en"}, timeout=6.0)
+async def _searx(q: str, n: int, bang: str = "") -> list[dict]:
+    r = await client.get(f"{SEARXNG}/search", params={"q": f"{bang} {q}" if bang else q, "format": "json",
+                                                       "language": "en"}, timeout=6.0)
     r.raise_for_status()
-    d = r.json()
     seen, results = set(), []
-    for x in d.get("results", []):
+    for x in r.json().get("results", []):
         u = x.get("url")
         if not u or u in seen:
             continue
@@ -285,8 +315,7 @@ async def _search(q: str, n: int, use_cache=True):
         results.append({"title": x.get("title", ""), "url": u, "snippet": (x.get("content") or "")[:300]})
         if len(results) >= n:
             break
-    searches.put(key, results)
-    return results, False
+    return results
 
 
 def _reply(request: Request, obj, status=200) -> Response:
@@ -311,7 +340,28 @@ def _int(d, k, default, lo, hi):
         return default
 
 
+GOOD_CHARS = 300  # a fetched page counts toward the reply once it has this much text
+
+
+def _clip(rec, max_chars):
+    r = dict(rec)
+    text = r.get("text") or ""
+    r["chars"] = len(text)
+    if len(text) > max_chars:
+        r["text"] = text[:max_chars]
+        r["truncated"] = True
+    return r
+
+
 async def search(request: Request):
+    """Search, then read `fetch` result pages, optimized for time to a useful answer.
+
+    Bing answers in about 0.2 s and Yahoo (same index, far better ranking for natural
+    questions) in about 0.6 s, so Bing's top results start loading speculatively while the
+    merged ranking is still being computed. Pages are then read from the top fetch+2 merged
+    results, and the reply goes out as soon as `fetch` of them have usable text, in rank
+    order, instead of waiting for the slowest page. Stragglers keep loading into the cache.
+    """
     t0 = time.monotonic()
     d = await request.json()
     q = str(d.get("q", "")).strip()
@@ -320,21 +370,77 @@ async def search(request: Request):
     n = _int(d, "n", 8, 1, 20)
     fetch = _int(d, "fetch", 3, 0, 8)
     max_chars = _int(d, "max_chars", 6000, 200, 100000)
-    deadline = _int(d, "deadline_ms", 5000, 500, 30000) / 1000
+    deadline = t0 + _int(d, "deadline_ms", 5000, 500, 30000) / 1000
     # "cache": false measures a cold search (used by the benchmark).
     use_cache = d.get("cache", True) is not False
-    try:
-        results, cached = await _search(q, n, use_cache)
-    except Exception as e:
-        return _reply(request, {"error": f"search failed: {type(e).__name__}: {e}"[:300]}, 502)
+
+    tasks: dict[str, asyncio.Task] = {}
+
+    def start(url):
+        if url in tasks:
+            return
+        hit = pages.get(url) if use_cache else None
+        if hit is not None:
+            done = asyncio.get_running_loop().create_future()
+            done.set_result(dict(hit, cached=True))
+            tasks[url] = done
+        else:
+            tasks[url] = _page_task(url) if use_cache else asyncio.create_task(_load(url))
+
+    results = searches.get((q, n)) if use_cache else None
+    search_cached = results is not None
+    if results is None:
+        main = asyncio.create_task(_searx(q, n))
+        if fetch:
+            fast = asyncio.create_task(_searx(q, fetch, bang="!bi"))
+            done, _ = await asyncio.wait({main, fast}, return_when=asyncio.FIRST_COMPLETED, timeout=6.0)
+            if fast in done and main not in done and not fast.exception():
+                for r in fast.result()[:fetch]:
+                    start(r["url"])
+        try:
+            results = await asyncio.wait_for(main, timeout=max(0.5, deadline - time.monotonic()))
+            searches.put((q, n), results)
+        except Exception as e:
+            fallback = fast.result() if fetch and fast.done() and not fast.exception() else None
+            if not fallback:
+                return _reply(request, {"error": f"search failed: {type(e).__name__}: {e}"[:300]}, 502)
+            results = fallback
     t_search = time.monotonic()
-    got = await _pages([r["url"] for r in results[:fetch]], max(0.3, deadline - (t_search - t0)), max_chars, use_cache) if fetch else []
+
+    chosen = []
+    if fetch:
+        candidates = [r["url"] for r in results[:fetch + 2]]
+        for u in candidates:
+            start(u)
+
+        def good():
+            return [u for u in candidates if tasks[u].done() and not tasks[u].exception()
+                    and len(tasks[u].result().get("text") or "") >= GOOD_CHARS]
+
+        pending = {tasks[u] for u in candidates}
+        while len(good()) < fetch and pending:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            done, pending = await asyncio.wait(pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+        chosen = [_clip(tasks[u].result(), max_chars) for u in good()[:fetch]]
+        if len(chosen) < fetch:
+            # Say what happened to the rest so the agent can decide whether to retry them.
+            for u in candidates:
+                if len(chosen) >= fetch:
+                    break
+                t = tasks[u]
+                if t.done() and len(t.result().get("text") or "") >= GOOD_CHARS:
+                    continue
+                rec = t.result() if t.done() and not t.exception() else {
+                    "url": u, "error": "still loading at deadline; fetch again shortly"}
+                chosen.append(_clip(rec, max_chars))
     return _reply(request, {
         "query": q,
         "results": results,
-        "pages": got,
+        "pages": chosen,
         "timing": {"search_ms": round((t_search - t0) * 1000), "total_ms": round((time.monotonic() - t0) * 1000),
-                   "search_cached": cached},
+                   "search_cached": search_cached},
     })
 
 
