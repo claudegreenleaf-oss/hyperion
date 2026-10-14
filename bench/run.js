@@ -186,7 +186,12 @@ async function executeRun(run, ctx = {}) {
     rec.error = String(e && e.message ? e.message : e).slice(0, 400);
   } finally {
     await chrome.close().catch(() => {});
-    fs.rmSync(profileDir, { recursive: true, force: true });
+    // Chrome's helpers can still be flushing into the profile after close(), so retry and never let cleanup kill the run.
+    try {
+      fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch (e) {
+      log('cleanup failed', profileDir, e.code);
+    }
   }
   return rec;
 }
