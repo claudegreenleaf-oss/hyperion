@@ -1,0 +1,14 @@
+[Unit]
+Description=SearXNG for the Hyperion relay (localhost:8855)
+After=network-online.target
+
+[Service]
+Slice=hyperion-relay.slice
+WorkingDirectory=/opt/hyperion-relay/searxng
+Environment=SEARXNG_SETTINGS_PATH=/opt/hyperion-relay/searxng-settings.yml
+ExecStart=/opt/hyperion-relay/venv/bin/python -m searx.webapp
+Restart=on-failure
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

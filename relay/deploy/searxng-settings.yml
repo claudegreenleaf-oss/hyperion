@@ -1,0 +1,41 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - yahoo
+      - bing
+      - duckduckgo
+engines:
+  - name: yahoo
+    disabled: false
+    weight: 3
+  - name: bing
+    disabled: false
+    weight: 0.5
+  - name: duckduckgo
+    disabled: true
+general:
+  instance_name: hyperion-relay
+  enable_metrics: false
+search:
+  safe_search: 0
+  formats: [html, json]
+  autocomplete: ""
+server:
+  bind_address: "127.0.0.1"
+  port: 8855
+  secret_key: "<generated on the server>"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: GET
+outgoing:
+  request_timeout: 2.5
+  max_request_timeout: 4.0
+  pool_connections: 50
+  pool_maxsize: 20
+  enable_http2: true
+  proxies:
+    all://:
+      - socks5h://127.0.0.1:40000
+ui:
+  static_use_hash: true

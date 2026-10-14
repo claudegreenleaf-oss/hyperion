@@ -1,0 +1,8 @@
+[Unit]
+Description=Hyperion agent search relay (capped so SCOTUS prod keeps its headroom)
+
+[Slice]
+MemoryMax=1100M
+MemoryHigh=900M
+CPUQuota=150%
+CPUWeight=50
