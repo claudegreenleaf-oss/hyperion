@@ -81,3 +81,13 @@ export function parseArgs(argv, spec) {
   }
   return out;
 }
+
+// Runs a function or expression in the page's main world through raw Runtime.evaluate on the
+// page's own CDP session. Puppeteer's page.evaluate waits on its execution-context tracking,
+// which never sees the document a prerender activation swaps in.
+export async function evalIn(page, fn, ...args) {
+  const expression = typeof fn === 'string' ? fn : `(${fn})(${args.map((a) => JSON.stringify(a)).join(',')})`;
+  const r = await page._client().send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  if (r.exceptionDetails) throw new Error(`evaluate: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+  return r.result.value;
+}

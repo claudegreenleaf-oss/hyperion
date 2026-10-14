@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { sleep, readNum, withTimeout } from './common.js';
+import { sleep, readNum, withTimeout, evalIn } from './common.js';
 
 // Runs inside the page. Everything is read from buffered performance entries after the
 // fact, so nothing is injected before navigation and prerendered documents work the same
@@ -42,7 +42,7 @@ export async function readPage(page, retries = 20) {
   let lastErr;
   for (let i = 0; i < retries; i++) {
     try {
-      return await withTimeout(page.evaluate(PAGE_METRICS), 10000, 'readPage');
+      return await withTimeout(evalIn(page, PAGE_METRICS), 10000, 'readPage');
     } catch (e) {
       lastErr = e;
       await sleep(100);
@@ -54,15 +54,32 @@ export async function readPage(page, retries = 20) {
 // Polls cheaply until the page URL differs from fromUrl and the document is complete.
 export async function waitForNavigation(page, fromUrl, timeoutMs = 25000) {
   const t0 = Date.now();
+  let last = 'no poll';
+  let detachedSince = 0;
   while (Date.now() - t0 < timeoutMs) {
     try {
-      const s = await withTimeout(page.evaluate(() => location.href + '\n' + document.readyState + '\n' + (document.prerendering ? 1 : 0)), 8000, 'poll');
+      const s = await withTimeout(evalIn(page, () => location.href + '\n' + document.readyState + '\n' + (document.prerendering ? 1 : 0)), 8000, 'poll');
       const [href, rs, pr] = s.split('\n');
+      detachedSince = 0;
       if (href !== fromUrl && rs === 'complete' && pr === '0') return href;
-    } catch {}
+      last = `href=${href} readyState=${rs} prerendering=${pr}`;
+    } catch (e) {
+      last = `poll error: ${e && e.message ? e.message : e}`;
+      // Puppeteer sometimes keeps the start document's frame after a prerender activation swaps
+      // the tab's main frame. The browser has navigated; the caller has to reattach.
+      // Puppeteer swaps to the activated page's session on its own within moments; only a
+      // detachment that persists means it lost the tab.
+      if (/detached Frame|Session closed|Target closed|No target with given id/.test(last)) detachedSince ||= Date.now();
+      if (detachedSince && Date.now() - detachedSince > 2000) {
+        const err = new Error(`page handle detached after navigation from ${fromUrl}`);
+        err.detached = true;
+        throw err;
+      }
+    }
     await sleep(60);
   }
-  throw new Error(`navigation from ${fromUrl} did not complete`);
+  const targets = page.browser().targets().map((t) => `${t.type()}:${t.url()}`).join(' | ');
+  throw new Error(`navigation from ${fromUrl} did not complete; last ${last}; page.url ${page.url()}; targets ${targets}`);
 }
 
 // Browser-wide process info through a browser-level CDP session.
@@ -92,6 +109,7 @@ export function attachPreloadLog(page) {
   const events = [];
   const t0 = performance.now();
   let attached = null;
+  let pg = page;
   const push = (kind) => (e) => {
     const key = e.key || {};
     events.push({
@@ -104,7 +122,7 @@ export function attachPreloadLog(page) {
     });
   };
   const refresh = async () => {
-    const c = page._client();
+    const c = pg._client();
     if (c === attached) return;
     attached = c;
     c.on('Preload.prefetchStatusUpdated', push('prefetch'));
@@ -112,7 +130,11 @@ export function attachPreloadLog(page) {
     c.on('Preload.ruleSetUpdated', (e) => events.push({ k: 'ruleset', t: Math.round(performance.now() - t0), u: (e.ruleSet?.url || '').slice(0, 120), s: 'seen' }));
     await withTimeout(c.send('Preload.enable'), 5000, 'Preload.enable').catch(() => {});
   };
-  return { events, refresh };
+  const rebind = async (p) => {
+    pg = p;
+    await refresh();
+  };
+  return { events, refresh, rebind };
 }
 
 export function loadSites(file) {

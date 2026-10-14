@@ -62,7 +62,7 @@ export async function launchChrome({ bin, cores, args, env = {} }) {
   const ws = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`chrome did not report a DevTools endpoint: ${stderrTail.slice(-400)}`)), 30000);
     proc.stderr.on('data', (d) => {
-      stderrTail = (stderrTail + d.toString()).slice(-4000);
+      stderrTail = (stderrTail + d.toString()).slice(-60000);
       const m = /DevTools listening on (ws:\/\/\S+)/.exec(stderrTail);
       if (m) {
         clearTimeout(timer);
@@ -74,12 +74,15 @@ export async function launchChrome({ bin, cores, args, env = {} }) {
       reject(new Error(`chrome exited early (${code}): ${stderrTail.slice(-400)}`));
     });
   });
-  proc.stderr.on('data', () => {}); // keep draining
+  // The endpoint listener above keeps running and keeps stderrTail current for crash reports.
   const exited = new Promise((r) => proc.on('exit', r));
   const browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null, protocolTimeout: 120000 });
   return {
     proc,
     browser,
+    ws,
+    stderr: () => stderrTail,
+    exitCode: () => proc.exitCode,
     kill() {
       try {
         process.kill(-proc.pid, 'SIGKILL');

@@ -1,11 +1,12 @@
-import { sleep, nowEpoch, withTimeout } from './common.js';
+import { sleep, nowEpoch, withTimeout, evalIn } from './common.js';
 
 const send = (cdp, method, params) => withTimeout(cdp.send(method, params), 10000, method);
 
 // Finds the anchor whose resolved href matches, scrolls it into view, and returns a point
 // inside it that actually hit-tests to the anchor.
 export async function locateLink(page, href, rng) {
-  const info = await withTimeout(page.evaluate(
+  const info = await withTimeout(evalIn(
+    page,
     (href, rx, ry) => {
       const strip = (u) => {
         try {

@@ -2,9 +2,10 @@
 // Runs one benchmark session. Meant to execute inside the hbench network namespace
 // (see bench.sh), with the replay server already running on 10.77.0.1.
 import fs from 'node:fs';
+import puppeteer from 'puppeteer-core';
 import os from 'node:os';
 import path from 'node:path';
-import { sleep, makeRng, nowEpoch, parseArgs, withTimeout } from './lib/common.js';
+import { sleep, makeRng, nowEpoch, parseArgs, withTimeout, evalIn } from './lib/common.js';
 import { writeProfile, chromeArgs, launchChrome, chromeVersion } from './lib/chrome.js';
 import { humanClick, sampleDwell } from './lib/input.js';
 import { readPage, waitForNavigation, processSample, ifaceBytes, attachPreloadLog, loadSites } from './lib/measure.js';
@@ -36,22 +37,66 @@ if (cfg['site-filter']) sites = sites.filter((s) => new RegExp(cfg['site-filter'
 if (cfg['site-limit']) sites = sites.slice(0, cfg['site-limit']);
 
 // ---------------------------------------------------------------- one measured run
+// Navigates with raw Page.navigate and polls for a new, fully loaded document, so it works on
+// page objects whose execution contexts Puppeteer lost track of.
 async function waitLoad(page, url) {
-  await page.goto(url, { waitUntil: 'load', timeout: 45000 });
+  const before = await withTimeout(evalIn(page, 'performance.timeOrigin'), 5000, 'timeOrigin').catch(() => 0);
+  const nav = await withTimeout(page._client().send('Page.navigate', { url }), 45000, 'Page.navigate');
+  if (nav.errorText) throw new Error(`${nav.errorText} at ${url}`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 45000) {
+    const s = await withTimeout(evalIn(page, '[performance.timeOrigin, document.readyState]'), 5000, 'loadPoll').catch(() => null);
+    if (s && s[0] !== before && s[1] === 'complete') return;
+    await sleep(50);
+  }
+  throw new Error(`Navigation timeout of 45000 ms exceeded at ${url}`);
 }
 
-async function trainSite(page, cdp, site, rng, n) {
+// Waits for the navigation away from fromUrl. Puppeteer sometimes keeps the start document's
+// frame after a prerender activation swaps the tab's main frame, so on a detached frame this
+// takes fresh page objects from a new connection and points s.page and s.cdp at them.
+async function follow(s, fromUrl, ctx) {
+  try {
+    return await waitForNavigation(s.page, fromUrl);
+  } catch (e) {
+    if (!e.detached) throw e;
+    // A second DevTools connection here crashes the browser in BuildTargetInfo, so look for the
+    // activated page's target on the existing connection instead.
+    const old = s.page;
+    let tabs = [];
+    let page = null;
+    for (let i = 0; i < 20 && !page; i++) {
+      tabs = old.browser().targets().filter((t) => t.type() === 'page');
+      for (const t of tabs) {
+        const p = await t.page().catch(() => null);
+        if (p && p !== old) page = p;
+      }
+      if (!page) await sleep(150);
+    }
+    if (!page) {
+      const desc = tabs.map((t) => `${t === old.target() ? 'same' : 'other'}:${t.url()}`).join(' | ');
+      throw new Error(`no fresh page object after detached frame from ${fromUrl}; page targets ${desc}`);
+    }
+    s.page = page;
+    s.cdp = { send: (m, p) => page._client().send(m, p) };
+    ctx.reattached = (ctx.reattached || 0) + 1;
+    if (s.onSwap) await s.onSwap(page);
+    return await waitForNavigation(page, fromUrl);
+  }
+}
+
+async function trainSite(s, site, rng, n, ctx) {
   const trained = site.links.filter((l) => !l.novel);
   for (let i = 0; i < n; i++) {
-    await waitLoad(page, site.start);
+    await waitLoad(s.page, site.start);
     await sleep(700);
     for (let j = 0; j < trained.length; j++) {
-      const before = page.url();
-      await humanClick(page, cdp, trained[j].href, rng, { dwellMs: rng.range(180, 420) });
-      await waitForNavigation(page, before);
+      const before = s.page.url();
+      await humanClick(s.page, s.cdp, trained[j].href, rng, { dwellMs: rng.range(180, 420) });
+      await follow(s, before, ctx);
       await sleep(800);
       if (j < trained.length - 1) {
-        await waitLoad(page, site.start);
+        await waitLoad(s.page, site.start);
         await sleep(500);
       }
     }
@@ -90,9 +135,15 @@ async function executeRun(run, ctx = {}) {
 
     // Training: identical scripted history for both arms. The predictor needs history.
     const nTrain = cfg.train;
-    if (nTrain > 0) await trainSite(page, cdp, site, rngTrain, nTrain);
+    if (nTrain > 0) {
+      const s = { page, cdp };
+      await trainSite(s, site, rngTrain, nTrain, ctx);
+      ({ page, cdp } = s);
+    }
     await withTimeout(cdp.send('Network.clearBrowserCache'), 10000, 'clearCache').catch(() => {});
     if (cfg['restart-after-train'] && nTrain > 0) {
+      if (ctx.rescue) await ctx.rescue.disconnect().catch(() => {});
+      ctx.rescue = null;
       await chrome.close();
       for (const d of ['Cache', 'Code Cache', 'GPUCache']) fs.rmSync(path.join(profileDir, 'Default', d), { recursive: true, force: true });
       chrome = await launchChrome({ bin, cores: cfg['chrome-cores'], args });
@@ -102,21 +153,24 @@ async function executeRun(run, ctx = {}) {
     const preload = attachPreloadLog(page);
     const preloadEvents = preload.events;
     await preload.refresh();
-    await page.goto('about:blank');
+    await waitLoad(page, 'about:blank');
     await sleep(500);
 
     // Cold start page load (cache cleared, history trained).
     const reqStats = { n: 0, cond: 0, s304: 0 };
     let counting = false;
-    page.on('request', (r) => {
-      if (!counting) return;
-      reqStats.n++;
-      const h = r.headers();
-      if (h['if-none-match'] || h['if-modified-since']) reqStats.cond++;
-    });
-    page.on('response', (r) => {
-      if (counting && r.status() === 304) reqStats.s304++;
-    });
+    const countRequests = (p) => {
+      p.on('request', (r) => {
+        if (!counting) return;
+        reqStats.n++;
+        const h = r.headers();
+        if (h['if-none-match'] || h['if-modified-since']) reqStats.cond++;
+      });
+      p.on('response', (r) => {
+        if (counting && r.status() === 304) reqStats.s304++;
+      });
+    };
+    countRequests(page);
     const b0 = ifaceBytes(cfg.iface);
     const p0 = await processSample(bsess);
     await waitLoad(page, site.start);
@@ -131,7 +185,9 @@ async function executeRun(run, ctx = {}) {
     const dwell = sampleDwell(rngClick);
     const fromUrl = page.url();
     const click = await humanClick(page, cdp, link.href, rngClick, { dwellMs: dwell });
-    const landed = await waitForNavigation(page, fromUrl);
+    const s = { page, cdp, onSwap: async (p) => { countRequests(p); await preload.rebind(p); } };
+    const landed = await follow(s, fromUrl, ctx);
+    ({ page, cdp } = s);
     await preload.refresh();
     await sleep(cfg.settle);
     const dest = await readPage(page);
@@ -145,7 +201,9 @@ async function executeRun(run, ctx = {}) {
     counting = false;
     const warm = await readPage(page);
 
-    const paintAbs = (m, v) => (v == null ? null : m.timeOrigin + Math.max(v, m.activationStart));
+    // A client-side route change keeps the start document, so its paint entries predate the click.
+    const softNav = dest.timeOrigin === startM.timeOrigin;
+    const paintAbs = (m, v) => (v == null || softNav ? null : m.timeOrigin + Math.max(v, m.activationStart));
     const fcpAbs = paintAbs(dest, dest.fcp ?? dest.fp);
     const lcpAbs = paintAbs(dest, dest.lcp);
     const d = (x, t0) => (x == null ? null : +(x - t0).toFixed(2));
@@ -153,6 +211,7 @@ async function executeRun(run, ctx = {}) {
     rec.link = { idx: run.linkIdx, href: link.href, type: nTrain > 0 && !link.novel ? 'trained' : 'novel', text: click.linkText };
     rec.input = { dwell: +click.dwell.toFixed(1), hold: +click.hold.toFixed(1), travel: +click.travel.toFixed(1), arrive_to_down: +(click.tDown - click.tArrive).toFixed(1) };
     rec.landed = landed;
+    rec.soft_nav = softNav;
     rec.spec = classify(dest);
     rec.dest = { activationStart: dest.activationStart, deliveryType: dest.deliveryType, transferSize: dest.transferSize, fcp: dest.fcp, lcp: dest.lcp, rulesScripts: dest.rulesScripts, lcpTag: dest.lcpTag };
     rec.start_rules = startM.rulesScripts;
@@ -183,8 +242,13 @@ async function executeRun(run, ctx = {}) {
       renderers_end: p2.renderers,
     };
   } catch (e) {
-    rec.error = String(e && e.message ? e.message : e).slice(0, 400);
+    rec.error = String(e && e.message ? e.message : e).slice(0, 2000);
+    if (ctx.chrome) rec.chrome_diag = { exit: ctx.chrome.exitCode(), stderr: ctx.chrome.stderr().slice(-20000) };
   } finally {
+    if (ctx.rescue) await ctx.rescue.disconnect().catch(() => {});
+    ctx.rescue = null;
+    rec.reattached = ctx.reattached || 0;
+    ctx.reattached = 0;
     await chrome.close().catch(() => {});
     // Chrome's helpers can still be flushing into the profile after close(), so retry and never let cleanup kill the run.
     try {
