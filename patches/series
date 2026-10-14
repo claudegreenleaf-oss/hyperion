@@ -33,3 +33,4 @@ hyperion/loading-predictors.patch
 hyperion/speculation-inject.patch
 hyperion/cache-content-addressed.patch
 hyperion/navigation-model.patch
+hyperion/prerender-governor.patch

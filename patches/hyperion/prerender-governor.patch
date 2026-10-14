@@ -1,0 +1,444 @@
+--- a/base/memory_coordinator/memory_coordinator_features.cc
++++ b/base/memory_coordinator/memory_coordinator_features.cc
+@@ -6,7 +6,7 @@
+ 
+ namespace base {
+ 
+-BASE_FEATURE(kStatefulMemoryPressure, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_FEATURE(kStatefulMemoryPressure, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE(kLRUCacheMemoryConsumer, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ }  // namespace base
+--- a/content/browser/preloading/prerender/prerender_attributes.h
++++ b/content/browser/preloading/prerender/prerender_attributes.h
+@@ -165,6 +165,13 @@
+   // TODO(https://crbug.com/440387014): Remove this field once OT is finished.
+   bool enable_cross_origin_prerender_iframes = false;
+ 
++  // Hyperion: how likely the user is to navigate here (0 to 100), and whether
++  // the local navigation model predicted it rather than a pointer event.
++  // PrerenderHostRegistry uses both to pick which non-immediate prerender to
++  // evict when the group is full.
++  int hyperion_confidence = 100;
++  bool hyperion_model_prediction = false;
++
+   // This is std::nullopt when prerendering is initiated by the browser.
+   std::optional<base::UnguessableToken> initiator_devtools_navigation_token;
+ 
+--- a/content/browser/preloading/prerenderer_impl.cc
++++ b/content/browser/preloading/prerenderer_impl.cc
+@@ -511,6 +511,9 @@
+       /*allow_reuse=*/false, candidate->form_submission);
+   attributes.enable_cross_origin_prerender_iframes =
+       enable_cross_origin_prerender_iframes_;
++  attributes.hyperion_confidence = confidence.value();
++  attributes.hyperion_model_prediction =
++      enacting_predictor == preloading_predictor::kPreloadingHeuristicsMLModel;
+ 
+   PreloadingTriggerType trigger_type =
+       PreloadingTriggerTypeFromSpeculationInjectionType(
+--- a/content/browser/preloading/prerender/prerender_host_registry.h
++++ b/content/browser/preloading/prerender/prerender_host_registry.h
+@@ -91,7 +91,26 @@
+   static constexpr base::TimeDelta kTimeToLiveInBackgroundForSpeculationRules =
+       base::Seconds(600);
+   static constexpr int kMaxRunningSpeculationRulesImmediatePrerenders = 10;
++  // Hyperion: the non-immediate limit is sized from available physical
++  // memory (see GetMaxLimit), never below this floor (Chromium's fixed limit)
++  // and never above kHyperionMaxNonImmediatePrerenders.
+   static constexpr int kMaxRunningSpeculationRulesNonImmediatePrerenders = 2;
++  static constexpr int kHyperionMaxNonImmediatePrerenders = 6;
++  // Memory kept free for everything else, and the budget per prerender (a
++  // renderer process plus its share of the GPU and network caches).
++  static constexpr int kHyperionReservedMemoryMb = 1536;
++  static constexpr int kHyperionMemoryPerPrerenderMb = 256;
++  // How fast the evidence behind a non-immediate prerender goes stale. A
++  // hover is intent about the next second or so; a navigation-model prediction
++  // is about the page as a whole.
++  static constexpr base::TimeDelta kHyperionPointerIntentHalfLife =
++      base::Seconds(5);
++  static constexpr base::TimeDelta kHyperionModelIntentHalfLife =
++      base::Seconds(60);
++
++  // Overrides the available-memory reading behind the non-immediate limit.
++  // A negative value restores the real reading.
++  static void SetHyperionAvailableMemoryMbForTesting(int available_mb);
+ 
+   using PassKey = base::PassKey<PrerenderHostRegistry>;
+ 
+@@ -379,9 +398,13 @@
+   // PreloadingTriggerType. SpeculationEagerness is additionally considered in
+   // order to apply the limits and behaviors according to
+   // PrerenderLimitGroup.
++  // `incoming_value` is the Hyperion value of the prerender asking to start
++  // (its confidence, 0 to 1); a full non-immediate group refuses it when every
++  // running host is worth more.
+   bool IsAllowedToStartPrerenderingForTrigger(
+       PreloadingTriggerType trigger_type,
+-      std::optional<blink::mojom::SpeculationEagerness> eagerness);
++      std::optional<blink::mojom::SpeculationEagerness> eagerness,
++      double incoming_value = 1.0);
+ 
+   // Called when we have the HTTP cache result of the main resource of the back
+   // navigation queried by `BackNavigationLikely`.
+@@ -445,6 +468,24 @@
+   std::array<base::circular_deque<PrerenderHostId>, 3>
+       arrival_order_queue_by_limit_group_;
+ 
++  // Hyperion: the evidence behind each queued host. A host's value is
++  // `confidence` halved every `half_life` since `since`; the non-immediate
++  // group evicts its least valuable host instead of its oldest.
++  struct HyperionIntent {
++    double confidence = 1.0;
++    base::TimeDelta half_life;
++    base::TimeTicks since;
++  };
++  static HyperionIntent HyperionIntentFor(
++      const PrerenderAttributes& attributes);
++  double HyperionValue(PrerenderHostId host_id, base::TimeTicks now) const;
++  // Returns the least valuable host in `queue` and stores its value in
++  // `value`. `queue` must not be empty.
++  PrerenderHostId HyperionLeastValuable(
++      const base::circular_deque<PrerenderHostId>& queue,
++      double& value) const;
++  base::flat_map<PrerenderHostId, HyperionIntent> hyperion_intent_;
++
+   // The host that is reserved for activation.
+   std::unique_ptr<PrerenderHost> reserved_prerender_host_;
+ 
+--- a/content/browser/preloading/prerender/prerender_host_registry.cc
++++ b/content/browser/preloading/prerender/prerender_host_registry.cc
+@@ -5,6 +5,7 @@
+ #include "content/browser/preloading/prerender/prerender_host_registry.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ 
+ #include "base/auto_reset.h"
+ #include "base/byte_size.h"
+@@ -78,6 +79,17 @@
+     case Visibility::VISIBLE:
+       return false;
+   }
++}
++
++// Hyperion: test override for the available-memory reading, in MiB.
++int g_hyperion_available_memory_mb_for_testing = -1;
++
++int HyperionAvailableMemoryMb() {
++  if (g_hyperion_available_memory_mb_for_testing >= 0) {
++    return g_hyperion_available_memory_mb_for_testing;
++  }
++  return base::saturated_cast<int>(
++      base::SysInfo::AmountOfAvailablePhysicalMemory().InMiB());
+ }
+ 
+ bool DeviceHasEnoughMemoryForPrerender() {
+@@ -765,8 +777,9 @@
+     // until the forerunners are cancelled, and suspend starting a new prerender
+     // when the number reaches the limit.
+     if (!initiator_web_contents.GetPrerenderHostRegistry()
+-             ->IsAllowedToStartPrerenderingForTrigger(attributes.trigger_type,
+-                                                      eagerness)) {
++             ->IsAllowedToStartPrerenderingForTrigger(
++                 attributes.trigger_type, eagerness,
++                 HyperionIntentFor(attributes).confidence)) {
+       // The reason we don't consider limit exceeded as an ineligibility
+       // reason is because we can't replicate the behavior in our other
+       // experiment groups for analysis. To prevent this we set
+@@ -822,6 +835,7 @@
+         GetPrerenderLimitGroup(attributes.trigger_type, eagerness);
+     arrival_order_queue_by_limit_group_[std::to_underlying(limit_group)]
+         .push_back(prerender_host_id);
++    hyperion_intent_[prerender_host_id] = HyperionIntentFor(attributes);
+   }
+ 
+   // Now start prerender the new page. If the PrerenderHost is reusing a frame
+@@ -902,6 +916,7 @@
+       attributes.trigger_type, attributes.GetEagerness());
+   arrival_order_queue_by_limit_group_[std::to_underlying(limit_group)]
+       .push_back(prerender_host_id);
++  hyperion_intent_[prerender_host_id] = HyperionIntentFor(attributes);
+   return prerender_host_id;
+ }
+ 
+@@ -1907,6 +1922,56 @@
+   for (auto& queue : arrival_order_queue_by_limit_group_) {
+     base::Erase(queue, host_id);
+   }
++  hyperion_intent_.erase(host_id);
++}
++
++// static
++void PrerenderHostRegistry::SetHyperionAvailableMemoryMbForTesting(
++    int available_mb) {
++  g_hyperion_available_memory_mb_for_testing = available_mb;
++}
++
++// static
++PrerenderHostRegistry::HyperionIntent PrerenderHostRegistry::HyperionIntentFor(
++    const PrerenderAttributes& attributes) {
++  return HyperionIntent{
++      .confidence = attributes.hyperion_confidence / 100.0,
++      .half_life = attributes.hyperion_model_prediction
++                       ? kHyperionModelIntentHalfLife
++                       : kHyperionPointerIntentHalfLife,
++      .since = base::TimeTicks::Now()};
++}
++
++double PrerenderHostRegistry::HyperionValue(PrerenderHostId host_id,
++                                            base::TimeTicks now) const {
++  auto it = hyperion_intent_.find(host_id);
++  if (it == hyperion_intent_.end()) {
++    // A host put back after a failed reuse lost its record; treat it as a
++    // fresh pointer trigger.
++    return 1.0;
++  }
++  const HyperionIntent& intent = it->second;
++  return intent.confidence *
++         std::exp2(-(now - intent.since) / intent.half_life);
++}
++
++PrerenderHostId PrerenderHostRegistry::HyperionLeastValuable(
++    const base::circular_deque<PrerenderHostId>& queue,
++    double& value) const {
++  CHECK(!queue.empty());
++  const base::TimeTicks now = base::TimeTicks::Now();
++  // Ties go to the oldest host, which keeps Chromium's FIFO order when every
++  // host carries the same evidence.
++  PrerenderHostId least = queue.front();
++  value = HyperionValue(least, now);
++  for (PrerenderHostId host_id : queue) {
++    const double host_value = HyperionValue(host_id, now);
++    if (host_value < value) {
++      least = host_id;
++      value = host_value;
++    }
++  }
++  return least;
+ }
+ 
+ PrerenderHostRegistry::PrerenderLimitGroup
+@@ -1968,7 +2033,8 @@
+ 
+ bool PrerenderHostRegistry::IsAllowedToStartPrerenderingForTrigger(
+     PreloadingTriggerType trigger_type,
+-    std::optional<blink::mojom::SpeculationEagerness> eagerness) {
++    std::optional<blink::mojom::SpeculationEagerness> eagerness,
++    double incoming_value) {
+   const PrerenderLimitGroup limit_group =
+       GetPrerenderLimitGroup(trigger_type, eagerness);
+ 
+@@ -1984,18 +2050,24 @@
+         return false;
+       }
+ 
+-      // When the limit on non-immediate speculation rules is reached, cancel
+-      // the oldest host to allow a newly incoming trigger to start.
++      // Hyperion: when the limit on non-immediate speculation rules is
++      // reached, cancel the least valuable host (see HyperionValue) rather
++      // than the oldest, and refuse the incoming trigger when it is worth
++      // less than every running host.
+       if (GetHostCountByLimitGroup(limit_group) >= host_limit) {
+         auto& queue = arrival_order_queue_by_limit_group_[std::to_underlying(
+             PrerenderLimitGroup::kSpeculationRulesNonImmediate)];
+-        CHECK(!queue.empty());
+-        PrerenderHostId oldest_prerender_host_id = queue.front();
++        double least_value = 0;
++        PrerenderHostId least_prerender_host_id =
++            HyperionLeastValuable(queue, least_value);
++        if (incoming_value < least_value) {
++          return false;
++        }
+         CHECK(
+-            prerender_host_by_id_.contains(oldest_prerender_host_id) ||
+-            prerender_new_tab_handle_by_id_.contains(oldest_prerender_host_id));
+-
+-        CHECK(CancelHost(oldest_prerender_host_id,
++            prerender_host_by_id_.contains(least_prerender_host_id) ||
++            prerender_new_tab_handle_by_id_.contains(least_prerender_host_id));
++
++        CHECK(CancelHost(least_prerender_host_id,
+                          PrerenderFinalStatus::
+                              kMaxNumOfRunningNonImmediatePrerendersExceeded));
+       }
+@@ -2037,7 +2109,13 @@
+     if (queue.empty()) {
+       break;
+     }
+-    PrerenderHostId host_id = evict_newest ? queue.back() : queue.front();
++    PrerenderHostId host_id;
++    if (limit_group == PrerenderLimitGroup::kSpeculationRulesNonImmediate) {
++      double unused_value = 0;
++      host_id = HyperionLeastValuable(queue, unused_value);
++    } else {
++      host_id = evict_newest ? queue.back() : queue.front();
++    }
+     if (!CancelHost(host_id, reason)) {
+       break;
+     }
+@@ -2056,7 +2134,14 @@
+     case PrerenderLimitGroup::kSpeculationRulesImmediate:
+       return kMaxRunningSpeculationRulesImmediatePrerenders;
+     case PrerenderLimitGroup::kSpeculationRulesNonImmediate:
+-      return kMaxRunningSpeculationRulesNonImmediatePrerenders;
++      // Hyperion: one prerender per kHyperionMemoryPerPrerenderMb of memory
++      // left after the reserve. Memory pressure then scales this down through
++      // GetScaledLimit.
++      return std::clamp(
++          (HyperionAvailableMemoryMb() - kHyperionReservedMemoryMb) /
++              kHyperionMemoryPerPrerenderMb,
++          kMaxRunningSpeculationRulesNonImmediatePrerenders,
++          kHyperionMaxNonImmediatePrerenders);
+     case PrerenderLimitGroup::kEmbedder: {
+       auto* delegate = web_contents()->GetDelegate();
+       return delegate ? delegate->AllowedPrerenderingCount(*web_contents()) : 0;
+--- a/content/browser/preloading/prerender/prerender_host_registry_unittest.cc
++++ b/content/browser/preloading/prerender/prerender_host_registry_unittest.cc
+@@ -118,12 +118,22 @@
+                 },
+             },
+         },
+-        {});
++        // Hyperion: loading-predictors enables LCP-timed prerender, which
++        // holds prerenders until an LCP signal these tests never send.
++        {blink::features::kLCPTimingPredictorPrerender2});
+   }
+   ~PrerenderHostRegistryTest() override = default;
++
++  void TearDown() override {
++    PrerenderHostRegistry::SetHyperionAvailableMemoryMbForTesting(-1);
++    RenderViewHostImplTestHarness::TearDown();
++  }
+ 
+   void SetUp() override {
+     RenderViewHostImplTestHarness::SetUp();
++    // Hyperion: pin the memory-sized non-immediate limit to Chromium's fixed
++    // limit so upstream expectations hold on any test machine.
++    PrerenderHostRegistry::SetHyperionAvailableMemoryMbForTesting(0);
+ 
+     web_contents_delegate_ =
+         std::make_unique<test::ScopedPrerenderWebContentsDelegate>(*contents());
+@@ -836,6 +846,37 @@
+                : registry().CreateAndStartHost(prerender_attributes);
+   }
+ 
++  // Starts a moderate speculation-rules prerender carrying the given Hyperion
++  // confidence (0 to 100) and source.
++  PrerenderHostId CreateNonImmediateHost(int confidence, bool model) {
++    static int unique_id = 0;
++    const GURL prerendering_url("https://example.com/hyperion_" +
++                                base::NumberToString(unique_id++));
++    PrerenderAttributes attributes = GeneratePrerenderAttributes(
++        prerendering_url, PreloadingTriggerType::kSpeculationRule, "",
++        blink::mojom::SpeculationEagerness::kModerate,
++        contents()->GetPrimaryMainFrame());
++    attributes.hyperion_confidence = confidence;
++    attributes.hyperion_model_prediction = model;
++    const PreloadingPredictor enacting_predictor =
++        model ? preloading_predictor::kPreloadingHeuristicsMLModel
++              : preloading_predictor::kUrlPointerHoverOnAnchor;
++    return IsNewTabTrigger(PrerenderLimitGroup::kSpeculationRulesNonImmediate)
++               ? registry().CreateAndStartHostForNewTab(
++                     attributes,
++                     content_preloading_predictor::kSpeculationRules,
++                     enacting_predictor, PreloadingConfidence{confidence})
++               : registry().CreateAndStartHost(attributes);
++  }
++
++  bool IsRunning(PrerenderHostId id) {
++    auto* web_contents_impl =
++        static_cast<WebContentsImpl*>(WebContents::FromFrameTreeNodeId(
++            PrerenderHost::GetFrameTreeNodeIdForId(id)));
++    return web_contents_impl && web_contents_impl->GetPrerenderHostRegistry()
++                                    ->FindNonReservedHostById(id);
++  }
++
+  private:
+   base::test::ScopedFeatureList feature_list_;
+ };
+@@ -937,6 +978,53 @@
+   ExpectUniqueSampleOfEmbedderFinalStatus(
+       PrerenderFinalStatus::kMaxNumOfRunningEmbedderPrerendersExceeded,
+       histogram_suffix, 0);
++}
++
++// Hyperion: the non-immediate limit grows with available memory, one
++// prerender per kHyperionMemoryPerPrerenderMb above the reserve, between
++// Chromium's fixed limit and kHyperionMaxNonImmediatePrerenders.
++TEST_P(PrerenderHostRegistryLimitGroupTest, HyperionNonImmediateLimitTracksMemory) {
++  using Registry = PrerenderHostRegistry;
++  const auto group = PrerenderLimitGroup::kSpeculationRulesNonImmediate;
++
++  Registry::SetHyperionAvailableMemoryMbForTesting(0);
++  EXPECT_EQ(registry().GetScaledLimitForTesting(group),
++            Registry::kMaxRunningSpeculationRulesNonImmediatePrerenders);
++
++  Registry::SetHyperionAvailableMemoryMbForTesting(
++      Registry::kHyperionReservedMemoryMb +
++      4 * Registry::kHyperionMemoryPerPrerenderMb);
++  EXPECT_EQ(registry().GetScaledLimitForTesting(group), 4);
++
++  Registry::SetHyperionAvailableMemoryMbForTesting(1 << 20);
++  EXPECT_EQ(registry().GetScaledLimitForTesting(group),
++            Registry::kHyperionMaxNonImmediatePrerenders);
++}
++
++// Hyperion: a full non-immediate group evicts its least valuable host, not its
++// oldest, and refuses a trigger worth less than every running host.
++TEST_P(PrerenderHostRegistryLimitGroupTest, HyperionEvictsLeastValuable) {
++  ASSERT_EQ(registry().GetScaledLimitForTesting(
++                PrerenderLimitGroup::kSpeculationRulesNonImmediate),
++            2);
++
++  // Oldest: a pointer trigger. Second: a weak navigation-model prediction.
++  PrerenderHostId pointer = CreateNonImmediateHost(100, false);
++  PrerenderHostId weak_model = CreateNonImmediateHost(40, true);
++  ASSERT_TRUE(pointer);
++  ASSERT_TRUE(weak_model);
++
++  // A third pointer trigger evicts the weak prediction, not the oldest host.
++  PrerenderHostId pointer2 = CreateNonImmediateHost(100, false);
++  ASSERT_TRUE(pointer2);
++  EXPECT_TRUE(IsRunning(pointer));
++  EXPECT_FALSE(IsRunning(weak_model));
++  EXPECT_TRUE(IsRunning(pointer2));
++
++  // A prediction weaker than both running hosts is refused.
++  EXPECT_FALSE(CreateNonImmediateHost(30, true));
++  EXPECT_TRUE(IsRunning(pointer));
++  EXPECT_TRUE(IsRunning(pointer2));
+ }
+ 
+ TEST_P(PrerenderHostRegistryLimitGroupTest, Embedder) {
+--- a/content/browser/preloading/prerenderer_impl_unittest.cc
++++ b/content/browser/preloading/prerenderer_impl_unittest.cc
+@@ -35,6 +35,9 @@
+ 
+   void SetUp() override {
+     RenderViewHostTestHarness::SetUp();
++    // Hyperion: pin the memory-sized non-immediate limit to Chromium's fixed
++    // limit so upstream expectations hold on any test machine.
++    PrerenderHostRegistry::SetHyperionAvailableMemoryMbForTesting(0);
+ 
+     scoped_feature_list_prerender2_fallback_.InitWithFeaturesAndParameters(
+         {
+@@ -55,7 +58,9 @@
+                 },
+             },
+         },
+-        {});
++        // Hyperion: loading-predictors enables LCP-timed prerender, which
++        // holds prerenders until an LCP signal these tests never send.
++        {blink::features::kLCPTimingPredictorPrerender2});
+ 
+     browser_context_ = std::make_unique<TestBrowserContext>();
+     web_contents_ = TestWebContents::Create(
+@@ -68,6 +73,7 @@
+   }
+ 
+   void TearDown() override {
++    PrerenderHostRegistry::SetHyperionAvailableMemoryMbForTesting(-1);
+     web_contents_.reset();
+     browser_context_.reset();
+     RenderViewHostTestHarness::TearDown();

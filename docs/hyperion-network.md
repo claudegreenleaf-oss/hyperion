@@ -147,6 +147,32 @@ written off the record, and cleared on any history deletion. Built against Chrom
 with the full Helium series on a6000-box; the 9 model tests pass (scoring, smoothing,
 template back-off, cross-origin rejection, clearing, eviction bound, save and reload).
 
+### `prerender-governor` (new code)
+Chromium keeps at most 2 non-immediate prerenders (hover, pointer-down and model-predicted)
+per tab and evicts the oldest when a third arrives. `navigation-model` passes its top two
+predictions through that group, so the model fills it when the page settles and the first
+hover throws away one of its prerenders, whatever either is worth. Two changes in
+`PrerenderHostRegistry` replace the fixed count and the FIFO order.
+
+**Capacity from memory.** The non-immediate limit is one prerender per 256 MB of available
+physical memory above a 1.5 GB reserve, clamped to 2 to 6 (`GetMaxLimit`). On top of that,
+Chromium's own governor scales every limit by the memory coordinator's current limit (100%,
+50% under moderate pressure, 0% under critical) and evicts down to it in `OnReleaseMemory`.
+That governor sits behind `StatefulMemoryPressure`, which is off in code and on by Finch for
+every desktop platform, so Helium never had it; the patch turns it on, which also makes the
+net and GPU caches, back/forward cache and spare renderer respond to pressure as in Chrome.
+
+**Eviction by expected value.** The confidence that `PreloadingDecider` already computes
+(the model's score, 100 for pointer triggers) stopped at `PrerendererImpl`; it now rides in
+`PrerenderAttributes` to the registry. Each queued host is worth its confidence halved every
+5 s for pointer triggers or every 60 s for model predictions, since a hover is intent about
+the next moment and a model prediction is about the page. A full group cancels its least
+valuable host, and refuses a newcomer worth less than every running host. With equal
+evidence the order is still Chromium's FIFO. Tests: memory-sized limit, and eviction of a
+weak prediction ahead of an older hover, plus all 95 existing prerender registry and
+prerenderer tests (which needed `LCPTimingPredictorPrerender2` off in their fixtures: it
+holds prerenders until an LCP signal unit tests never send).
+
 ## Not pursued, and why
 
 - **A relay on scotus-vps (MASQUE or a split-connection proxy).** The VPS is 21 ms from home,
@@ -163,13 +189,14 @@ template back-off, cross-origin rejection, clearing, eviction bound, save and re
   exempt from network-service delays on non-cellular links; the remaining knobs are small and
   carry regression risk. Deferred until the benchmark harness exists.
 
+- **Proactive DNS refresh before TTL expiry** and **request-priority changes:** designed on
+  2026-10-13 and judged modest to near zero. `net-finch-parity` already serves stale entries
+  while refreshing, which removes most of the expired-TTL cost.
+
 ## Next
 
 1. Record-and-replay benchmark (Mahimahi-style, 25 ms RTT) plus real-site click-to-paint, to
    measure each patch against variance. Anything that does not beat noise gets reverted.
-2. Proactive DNS refresh of frequently used hosts before TTL expiry, in `HostResolverManager`,
-   which goes beyond what Chromium ships.
-3. Raise the non-immediate prerender limit behind a memory-pressure governor.
 
 ## Sources
 
