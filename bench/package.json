@@ -1,0 +1,10 @@
+{
+  "name": "hyperion-bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A/B benchmark harness for Hyperion: WPR replay, netns latency, real-input navigation, paired statistics.",
+  "dependencies": {
+    "puppeteer-core": "24.20.0"
+  }
+}

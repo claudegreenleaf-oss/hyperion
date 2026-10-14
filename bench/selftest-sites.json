@@ -1,0 +1,15 @@
+{
+  "meta": { "note": "synthetic site served by selftest-server.js, used by the preflight check" },
+  "sites": [
+    {
+      "name": "selftest",
+      "start": "http://10.77.0.3:8080/",
+      "category": "synthetic",
+      "links": [
+        { "href": "http://10.77.0.3:8080/p1.html", "novel": false },
+        { "href": "http://10.77.0.3:8080/p2.html", "novel": false },
+        { "href": "http://10.77.0.3:8080/p3.html", "novel": true }
+      ]
+    }
+  ]
+}

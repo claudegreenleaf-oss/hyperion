@@ -1,0 +1,6 @@
+node_modules/
+archives/
+results/
+go/
+cft/
+*.log

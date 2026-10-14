@@ -1,0 +1,141 @@
+{
+ "sites": [
+  {
+   "name": "wikipedia",
+   "start": "https://en.wikipedia.org/wiki/Web_browser",
+   "category": "reference"
+  },
+  {
+   "name": "arstechnica",
+   "start": "https://arstechnica.com/",
+   "category": "news"
+  },
+  {
+   "name": "techcrunch",
+   "start": "https://techcrunch.com/",
+   "category": "news"
+  },
+  {
+   "name": "theverge",
+   "start": "https://www.theverge.com/",
+   "category": "news"
+  },
+  {
+   "name": "wired",
+   "start": "https://www.wired.com/",
+   "category": "news"
+  },
+  {
+   "name": "sciencedaily",
+   "start": "https://www.sciencedaily.com/",
+   "category": "news"
+  },
+  {
+   "name": "engadget",
+   "start": "https://www.engadget.com/",
+   "category": "news"
+  },
+  {
+   "name": "mdn",
+   "start": "https://developer.mozilla.org/en-US/docs/Web/API",
+   "category": "docs"
+  },
+  {
+   "name": "pythondocs",
+   "start": "https://docs.python.org/3/library/index.html",
+   "category": "docs"
+  },
+  {
+   "name": "reactdev",
+   "start": "https://react.dev/reference/react",
+   "category": "docs"
+  },
+  {
+   "name": "devchrome",
+   "start": "https://developer.chrome.com/docs/web-platform",
+   "category": "docs"
+  },
+  {
+   "name": "kubernetes",
+   "start": "https://kubernetes.io/docs/concepts/",
+   "category": "docs"
+  },
+  {
+   "name": "cloudflare-docs",
+   "start": "https://developers.cloudflare.com/",
+   "category": "docs"
+  },
+  {
+   "name": "nextjs-docs",
+   "start": "https://nextjs.org/docs",
+   "category": "docs"
+  },
+  {
+   "name": "allbirds",
+   "start": "https://www.allbirds.com/collections/mens",
+   "category": "shopping",
+   "selector": "a[href*=\"/products/\"]"
+  },
+  {
+   "name": "kith",
+   "start": "https://kith.com/collections/mens-footwear",
+   "category": "shopping",
+   "selector": "a[href*=\"/products/\"]"
+  },
+  {
+   "name": "gymshark",
+   "start": "https://www.gymshark.com/collections/all-products/mens",
+   "category": "shopping",
+   "selector": "a[href*=\"/products/\"]"
+  },
+  {
+   "name": "bookstoscrape",
+   "start": "https://books.toscrape.com/",
+   "category": "shopping"
+  },
+  {
+   "name": "webscraper-shop",
+   "start": "https://webscraper.io/test-sites/e-commerce/static/computers/laptops",
+   "category": "shopping",
+   "selector": "a.title"
+  },
+  {
+   "name": "hackernews",
+   "start": "https://news.ycombinator.com/",
+   "category": "social",
+   "selector": "td.subtext a[href^=\"item?id=\"]"
+  },
+  {
+   "name": "lobsters",
+   "start": "https://lobste.rs/",
+   "category": "social",
+   "selector": "a[href^=\"/s/\"]"
+  },
+  {
+   "name": "discourse",
+   "start": "https://meta.discourse.org/latest",
+   "category": "social"
+  },
+  {
+   "name": "github-trending",
+   "start": "https://github.com/trending",
+   "category": "social"
+  },
+  {
+   "name": "devto",
+   "start": "https://dev.to/",
+   "category": "social",
+   "selector": "a[id^=\"article-link-\"]"
+  },
+  {
+   "name": "wordpress-news",
+   "start": "https://wordpress.org/news/",
+   "category": "speculation"
+  },
+  {
+   "name": "gutenberg",
+   "start": "https://www.gutenberg.org/ebooks/",
+   "category": "reference"
+  }
+ ]
+}
