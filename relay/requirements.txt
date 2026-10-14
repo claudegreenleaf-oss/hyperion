@@ -3,3 +3,5 @@ trafilatura==2.0.0
 zstandard==0.23.0
 starlette==0.46.2
 uvicorn==0.34.3
+curl_cffi==0.16.3
+pypdfium2==5.14.0

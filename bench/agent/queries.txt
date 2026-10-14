@@ -1,0 +1,21 @@
+# Research-style agent queries, mixed technical and general.
+how does QUIC loss recovery work
+python asyncio wait vs gather
+what is the population of Nairobi
+transformer attention explained
+best way to cache DNS on a flaky connection
+symptoms of altitude sickness and treatment
+rust borrow checker lifetime elision rules
+history of the Silk Road trade routes
+how do satellite internet latency and jitter affect video calls
+postgres vacuum full vs vacuum analyze
+causes of the 2008 financial crisis
+how does CRISPR gene editing work
+kubernetes pod disruption budget example
+monsoon season dates in Kerala
+difference between TCP BBR and CUBIC
+how to purify water while hiking
+supreme court commerce clause cases
+react useEffect cleanup function
+what causes inflation according to economists
+sqlite write ahead log explained

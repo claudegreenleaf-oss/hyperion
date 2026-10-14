@@ -14,6 +14,11 @@ returns everything as one zstd-compressed JSON bundle: one round trip and a few 
 - `mcp_client.py`: thin stdio MCP server for Claude Code and other agents, with the tools
   `web_search` and `read_pages`. It holds one keep-alive connection to the relay and does no
   heavy work itself.
+- Fetching is tiered: Stack Exchange question pages go through the official API (Stack
+  Overflow puts every non-browser client behind a Cloudflare JavaScript challenge); other
+  pages try a plain client, then a Chrome TLS fingerprint (curl_cffi), then a worker relay on
+  a6000-box's residential IP (`RELAY_WORKER`), since some sites (deepwiki on Vercel) refuse
+  datacenter IPs. PDFs are extracted with pypdfium2 (first 40 pages).
 - `deploy/`: the SearXNG settings (secret removed) and systemd units used on scotus-vps.
 
 ## Deployment (scotus-vps)
