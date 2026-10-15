@@ -36,12 +36,46 @@ def counters():
     return tuple(int(open(f"{base}/{k}").read()) for k in ("rx_bytes", "tx_bytes"))
 
 
+pages_meta = {}
+relay_clients = []
+relay_ewma = [1.5]
+
+
+async def _relay_post(body, timeout):
+    # Same policy as relay/mcp_client.py: two warm connections held for the whole run (the MCP
+    # process keeps them open), and a hedge on the second one after ~2.5x the usual time.
+    if not relay_clients:
+        relay_clients.extend(httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "zstd, gzip"},
+                                               limits=httpx.Limits(keepalive_expiry=600)) for _ in range(2))
+    t0 = time.monotonic()
+    hedge_after = min(10.0, max(2.5, 2.5 * relay_ewma[0]))
+    tasks = [asyncio.create_task(relay_clients[0].post(f"{RELAY}/v1/search", json=body))]
+    done, _ = await asyncio.wait(tasks, timeout=hedge_after)
+    hedged = not done or tasks[0].exception() is not None
+    if hedged:
+        tasks.append(asyncio.create_task(relay_clients[1].post(f"{RELAY}/v1/search", json=body)))
+    pending, err = set(tasks), None
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            if t.exception() is None:
+                for other in pending:
+                    other.cancel()
+                relay_ewma[0] = 0.8 * relay_ewma[0] + 0.2 * (time.monotonic() - t0)
+                pages_meta["hedged"] = hedged
+                return t.result()
+            err = t.exception()
+    raise err
+
+
 async def arm_relay(q, urls, timeout):
-    async with httpx.AsyncClient(timeout=timeout, headers={"Accept-Encoding": "zstd, gzip"}) as c:
-        r = await c.post(f"{RELAY}/v1/search", json={"q": q, "n": 8, "fetch": 3, "max_chars": 6000,
-                                                     "deadline_ms": int(timeout * 1000) - 2000, "cache": False})
-        d = r.json()
-    return [{"url": p["url"], "chars": p.get("chars", 0), "error": p.get("error")} for p in d.get("pages", [])]
+    r = await _relay_post({"q": q, "n": 8, "fetch": 3, "max_chars": 6000,
+                           "deadline_ms": int(timeout * 1000) - 2000, "cache": False}, timeout)
+    d = r.json()
+    pages = [{"url": p["url"], "chars": p.get("chars", 0), "error": p.get("error")} for p in d.get("pages", [])]
+    # The relay's own processing time; wall time minus this is what the link cost.
+    pages_meta["server_ms"] = d.get("timing", {}).get("total_ms")
+    return pages
 
 
 async def arm_fetch(q, urls, timeout):
@@ -90,6 +124,9 @@ async def trial(arm, q, urls, args):
             pages = await asyncio.wait_for(arm_fetch(q, urls, args.timeout), args.timeout * 2)
         else:
             pages = await arm_browser(q, urls, args.timeout, args.chrome)
+        if arm == "relay":
+            rec["server_ms"] = pages_meta.pop("server_ms", None)
+            rec["hedged"] = pages_meta.pop("hedged", None)
         rec["pages_read"] = sum(1 for p in pages if p.get("chars", 0) >= MIN_CHARS)
         rec["pages"] = pages
         rec["ok"] = True
