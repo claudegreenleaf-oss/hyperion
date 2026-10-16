@@ -10,6 +10,7 @@ Pages still loading at the deadline keep loading in the background, so a follow-
 """
 
 import asyncio
+import base64
 import gzip
 import json
 import os
@@ -233,8 +234,11 @@ async def _convert(rec, body: bytes, ctype: str, encoding: str | None):
         return
     else:
         html = body.decode(encoding or "utf-8", errors="replace")
+        t0 = time.monotonic()
         async with EXTRACT_SLOTS:
+            t1 = time.monotonic()
             text, rec["title"] = await asyncio.to_thread(_extract, html, rec["final_url"])
+        rec["slot_wait_ms"], rec["extract_ms"] = round((t1 - t0) * 1000), round((time.monotonic() - t1) * 1000)
     rec["text"] = text
     if not text.strip():
         # Nothing server-rendered to extract: the page builds itself with JavaScript.
@@ -318,6 +322,53 @@ async def _searx(q: str, n: int, bang: str = "") -> list[dict]:
     return results
 
 
+BING_UNWRAP = re.compile(r"^https?://(?:www\.)?bing\.com/ck/a\?")
+bing_client = httpx.AsyncClient(
+    http2=True, timeout=httpx.Timeout(5.0, connect=2.0),
+    limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=300),
+    headers={"User-Agent": UA, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
+)
+
+
+def _bing_url(href: str) -> str:
+    # Result links are click-tracking redirects carrying the target as "a1" + urlsafe base64.
+    if not BING_UNWRAP.match(href):
+        return href
+    u = urllib.parse.parse_qs(urlsplit(href).query).get("u", [""])[0]
+    if not u.startswith("a1"):
+        return href
+    try:
+        return base64.urlsafe_b64decode(u[2:] + "=" * (-len(u[2:]) % 4)).decode()
+    except ValueError:
+        return href
+
+
+async def _bing(q: str, n: int) -> list[dict]:
+    """Bing's own results page, queried directly in the en-US market: same top 3 as Yahoo in
+    54 of 60 measured queries (Yahoo serves Bing's index), about 100 ms sooner. SearXNG's
+    Bing engine is not used for this because it garbles natural-language queries."""
+    r = await bing_client.get("https://www.bing.com/search", params={"q": q, "setlang": "en-US", "cc": "US", "mkt": "en-US"})
+    r.raise_for_status()
+    doc = await asyncio.to_thread(lxml.html.fromstring, r.text)
+    seen, results = set(), []
+    for li in doc.xpath('//li[contains(@class,"b_algo")]'):
+        a = li.xpath(".//h2/a")
+        if not a:
+            continue
+        u = _bing_url(a[0].get("href", ""))
+        if not u.startswith("http") or u in seen:
+            continue
+        seen.add(u)
+        snip = li.xpath('.//p | .//div[contains(@class,"b_caption")]')
+        results.append({"title": a[0].text_content().strip(), "url": u,
+                        "snippet": (snip[0].text_content().strip() if snip else "")[:300]})
+        if len(results) >= n:
+            break
+    if not results:
+        raise RuntimeError("bing returned no results (challenge page?)")
+    return results
+
+
 def _reply(request: Request, obj, status=200) -> Response:
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
     ae = request.headers.get("accept-encoding", "")
@@ -356,11 +407,11 @@ def _clip(rec, max_chars):
 async def search(request: Request):
     """Search, then read `fetch` result pages, optimized for time to a useful answer.
 
-    Bing answers in about 0.2 s and Yahoo (same index, far better ranking for natural
-    questions) in about 0.6 s, so Bing's top results start loading speculatively while the
-    merged ranking is still being computed. Pages are then read from the top fetch+2 merged
-    results, and the reply goes out as soon as `fetch` of them have usable text, in rank
-    order, instead of waiting for the slowest page. Stragglers keep loading into the cache.
+    Pages are read from the top fetch+2 results, starting the moment Yahoo answers, and the
+    reply goes out as soon as `fetch` of them have usable text, in rank order, instead of
+    waiting for the slowest page. Stragglers keep loading into the cache. (Speculatively
+    loading Bing's top results while Yahoo works was measured and dropped: only 4 of 60 of
+    them ended up in the final top 3, so it mostly took extraction slots from real pages.)
     """
     t0 = time.monotonic()
     d = await request.json()
@@ -387,24 +438,32 @@ async def search(request: Request):
         else:
             tasks[url] = _page_task(url) if use_cache else asyncio.create_task(_load(url))
 
-    results = searches.get((q, n)) if use_cache else None
+    results, engine = (searches.get((q, n)) if use_cache else None), "cache"
     search_cached = results is not None
     if results is None:
-        main = asyncio.create_task(_searx(q, n))
-        if fetch:
-            fast = asyncio.create_task(_searx(q, fetch, bang="!bi"))
-            done, _ = await asyncio.wait({main, fast}, return_when=asyncio.FIRST_COMPLETED, timeout=6.0)
-            if fast in done and main not in done and not fast.exception():
-                for r in fast.result()[:fetch]:
-                    start(r["url"])
-        try:
-            results = await asyncio.wait_for(main, timeout=max(0.5, deadline - time.monotonic()))
-            searches.put((q, n), results)
-        except Exception as e:
-            fallback = fast.result() if fetch and fast.done() and not fast.exception() else None
-            if not fallback:
-                return _reply(request, {"error": f"search failed: {type(e).__name__}: {e}"[:300]}, 502)
-            results = fallback
+        # Race Yahoo (via SearXNG) against Bing's own page: they rank the same index almost
+        # identically, so the first to answer sets the results and seeds the page fetches,
+        # and either one covers for the other when it is slow, rate-limited or challenged.
+        racers = {asyncio.create_task(_searx(q, n, bang="!yh"), name="yahoo"),
+                  asyncio.create_task(_bing(q, n), name="bing")}
+        results, err, engine = None, None, ""
+        pending = racers
+        while pending and results is None:
+            done, pending = await asyncio.wait(pending, timeout=max(0.5, min(5.0, deadline - time.monotonic())),
+                                               return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                break
+            for t in done:
+                if t.exception() is None and t.result():
+                    results, engine = t.result(), t.get_name()
+                    break
+                err = t.exception() or err
+        for t in pending:
+            t.cancel()
+        if not results:
+            msg = f"{type(err).__name__}: {err}" if err else "no results"
+            return _reply(request, {"error": f"search failed: {msg}"[:300]}, 502)
+        searches.put((q, n), results)
     t_search = time.monotonic()
 
     chosen = []
@@ -440,7 +499,7 @@ async def search(request: Request):
         "results": results,
         "pages": chosen,
         "timing": {"search_ms": round((t_search - t0) * 1000), "total_ms": round((time.monotonic() - t0) * 1000),
-                   "search_cached": search_cached},
+                   "search_cached": search_cached, "engine": engine},
     })
 
 

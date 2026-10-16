@@ -27,9 +27,13 @@ returns everything as one zstd-compressed JSON bundle: one round trip and a few 
   (127.0.0.1:8855) and `hyperion-relay` (tailnet 100.104.232.110:8790), both inside
   `hyperion-relay.slice` (1.1 GB memory, 1.5 CPUs) so SCOTUS prod keeps its headroom.
 - SearXNG egresses through the local Cloudflare WARP SOCKS proxy (127.0.0.1:40000).
-- Engines: Yahoo (weight 3) and Bing (weight 0.5). Google answers "access denied", DuckDuckGo
-  and Qwant CAPTCHA, Brave and Wikipedia rate-limit, and Mojeek and Startpage do not load.
-  Bing alone mangles natural-language queries ("how does X" returns pages about "does").
+- Search races Yahoo (through SearXNG) against Bing's own results page queried directly in
+  the en-US market. They rank the same index: top 3 identical in 60 of 60 test queries.
+  Bing usually answers first (about 0.25 s against 0.55 s), and either engine covers for the
+  other when it is slow or blocked. SearXNG's own Bing engine is not used for this because it
+  garbles natural-language queries ("how does X" returns pages about "does"). Google answers
+  "access denied", DuckDuckGo and Qwant CAPTCHA, Brave and Wikipedia rate-limit, and Mojeek
+  and Startpage do not load.
 
 Register the MCP client:
 
