@@ -6,6 +6,7 @@ defaults:
 
 permissions:
   contents: read
+  actions: read
 
 on:
   workflow_call:
@@ -16,10 +17,19 @@ on:
       os:
         required: true
         type: string
+      resume_run_id:
+        required: false
+        type: string
+        default: ""
+      apply_patches:
+        required: false
+        type: string
+        default: ""
 
 jobs:
   retrieve-resources:
     name: Retrieve resources required for building
+    if: ${{ inputs.resume_run_id == '' }}
     runs-on: ${{ inputs.os }}
     steps:
       - name: Clone repository
@@ -44,11 +54,15 @@ jobs:
 
   build_job_01:
     needs: retrieve-resources
+    if: ${{ !failure() && !cancelled() }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
       arch: ${{ inputs.arch }}
       os: ${{ inputs.os }}
+      resume: ${{ inputs.resume_run_id != '' }}
+      from_run: ${{ inputs.resume_run_id }}
+      apply_patches: ${{ inputs.apply_patches }}
 
   build_job_02:
     needs: build_job_01

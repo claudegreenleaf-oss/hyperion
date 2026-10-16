@@ -8,3 +8,4 @@ build/
 
 resources/generated/
 .stage/
+__pycache__/

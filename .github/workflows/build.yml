@@ -6,6 +6,14 @@ on:
         required: false
         description: "Runner image name"
         default: "macos-latest"
+      resume-run-id:
+        required: false
+        description: "Hyperion: resume the build saved by this earlier run instead of starting over"
+        default: ""
+      apply-patches:
+        required: false
+        description: "Hyperion: patches (paths under patches/) to apply onto the resumed tree, for ones added since that run"
+        default: ""
       do-release:
         required: false
         type: boolean
@@ -14,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -28,6 +37,8 @@ jobs:
     with:
       arch: ${{ matrix.arch }}
       os: ${{ inputs.runner }}
+      resume_run_id: ${{ inputs.resume-run-id }}
+      apply_patches: ${{ inputs.apply-patches }}
 
   release:
     needs: build
