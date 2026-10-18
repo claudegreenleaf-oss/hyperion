@@ -25,6 +25,8 @@ pub const BUSY: u8 = 2;
 pub static PHASE: AtomicU8 = AtomicU8::new(IDLE);
 
 const PREROLL_S: f64 = 1.2;
+const HISTORY_FRAMES: usize = 20; // 1.6 s of 80 ms frames, replayed when sound starts
+const GATE_DB: f32 = 9.0; // above the noise floor counts as sound
 
 struct Shared {
     ring: VecDeque<(Obj, u32)>,
@@ -178,6 +180,11 @@ fn worker(rx: Receiver<Vec<f32>>) {
     };
     log("wake: ready");
     let mut buf: Vec<f32> = Vec::with_capacity(wake::FRAME * 4);
+    // The models only run while there is sound: a quiet room costs nothing beyond the mic.
+    // When sound starts, the last 1.6 s are replayed so detection sees full context.
+    let mut history: VecDeque<Vec<f32>> = VecDeque::with_capacity(HISTORY_FRAMES + 1);
+    let mut active_until = Instant::now();
+    let mut active = false;
     let mut floor_db = -55.0f32;
     let mut listen = Listen::default();
     let mut cooldown_until = Instant::now();
@@ -210,13 +217,32 @@ fn worker(rx: Receiver<Vec<f32>>) {
                 }
             }
 
-            let score = match det.push(&frame) {
-                Ok(s) => s,
-                Err(e) => {
-                    log(format!("wake: inference error: {e}"));
-                    0.0
+            let now = Instant::now();
+            if phase == IDLE && db > floor_db + GATE_DB {
+                active_until = now + std::time::Duration::from_millis(2500);
+            }
+            let was_active = active;
+            active = phase == IDLE && now < active_until;
+            let mut score = 0.0f32;
+            if active {
+                if !was_active {
+                    det.restart();
+                    for old in history.iter() {
+                        score = score.max(det.push(old).unwrap_or(0.0));
+                    }
                 }
-            };
+                score = score.max(match det.push(&frame) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log(format!("wake: inference error: {e}"));
+                        0.0
+                    }
+                });
+            }
+            history.push_back(frame.clone());
+            if history.len() > HISTORY_FRAMES {
+                history.pop_front();
+            }
             if score > 0.3 {
                 log(format!("wake: score {score:.2} phase {phase}"));
             }

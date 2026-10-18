@@ -114,4 +114,16 @@ impl Detector {
         self.feats.clear();
         self.frames = 0;
     }
+
+    /// Start from a clean state (used when sound resumes after a quiet spell; the caller then
+    /// replays the buffered audio so the model sees the same context it would have).
+    pub fn restart(&mut self) {
+        self.raw.clear();
+        self.mels.clear();
+        for _ in 0..MEL_WINDOW {
+            self.mels.push_back([1.0; MEL_BINS]);
+        }
+        self.feats.clear();
+        self.frames = 0;
+    }
 }
