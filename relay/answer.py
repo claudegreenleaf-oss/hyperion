@@ -227,7 +227,7 @@ async def _local_chat(system: str, user: str, max_tokens: int, budget: float) ->
         return None
 
 
-ROUTE = """Route a request spoken to a Mac voice assistant. Reply with one JSON object only.
+ROUTE = """Route a request spoken to a Mac voice assistant. Reply with one JSON object only. The words come from speech recognition and may be misheard: act on what was most likely said. "Open ..." opens an app or site ("open the lock" is the Clock app). Lock or sleep the Mac only when plainly asked to lock or sleep it.
 {{"kind":"command","id":"c3","args":{{"arg":"value"}},"done":"at most 4 words"}} if one of COMMANDS does it. Use its argument names; times like 2026-10-19T09:00; for on, off or a level use a set command with a value, not a toggle.
 {{"kind":"open","url":"https://...","label":"Site"}} to go to a website. Installed apps are commands.
 {{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions, spelling, the current time or date (from Now), or questions about you: you are Thomas's voice assistant, built into his browser, Hyperion (60 words max, with only the few words that answer it in **double asterisks**, once).
