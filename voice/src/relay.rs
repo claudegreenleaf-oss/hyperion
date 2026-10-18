@@ -29,7 +29,7 @@ fn now() -> String {
 }
 
 fn body(q: &str, prefetch: bool) -> Value {
-    json!({"q": q, "voice": true, "prefetch": prefetch, "now": now(), "commands": crate::commands::catalog()})
+    json!({"q": q, "voice": true, "prefetch": prefetch, "now": now(), "commands": crate::commands::catalog_for(q)})
 }
 
 /// Start the relay working on a query we might ask (a partial transcript), so the pages it

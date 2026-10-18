@@ -181,21 +181,30 @@ async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str |
         return None
 
 
-ROUTE = """You route requests spoken to a Mac's voice assistant. Now: {now}. Reply with one JSON object only.
-{{"kind":"command","id":"<an id from COMMANDS>","args":{{...}},"done":"what you did, 2 to 6 words"}} when the user wants the Mac to do something one of the COMMANDS does (open an app, change brightness or volume, set a reminder, control music, ...). Use the argument names listed for that command; give times as local ISO 8601 like 2026-10-19T09:00.
-{{"kind":"open","url":"https://...","label":"Site name"}} when the user wants to go to a website or web app ("open YouTube", "go to my Gmail"). Apps installed on the Mac are commands, not websites.
-{{"kind":"answer","answer":"..."}} when you are certain of the answer from general knowledge and it cannot have changed recently: arithmetic, unit conversions, definitions, spelling, settled facts. At most 60 words; lists one item per line.
-{{"kind":"search","query":"..."}} for any other question: anything current, local, about dates, deadlines, schedules, prices, scores, news, people's current roles, or anything you are not sure of. The query is a short web search query; fix words speech recognition probably misheard: about colleges and admissions, "REI" or "RAE" means REA (Restrictive Early Action) and "supplements" means supplemental essays.
-
-COMMANDS (id | what it does | arguments):
+ROUTE = """Route a request spoken to a Mac voice assistant. Reply with one JSON object only.
+{{"kind":"command","id":"c3","args":{{"arg":"value"}},"done":"at most 4 words"}} if one of COMMANDS does it. Use its argument names; times like 2026-10-19T09:00; for on, off or a level use a set command with a value, not a toggle.
+{{"kind":"open","url":"https://...","label":"Site"}} to go to a website. Installed apps are commands.
+{{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions or spelling (60 words max).
+{{"kind":"search","query":"..."}} for any other question: a short web query, fixing misheard words ("REI" or "RAE" is REA, "supplements" is supplemental essays).
+COMMANDS:
 {commands}"""
 
 
 async def route(spoken: str, commands: str = "", now: str = "") -> dict | None:
     """Decide in one quick model call (about 0.3 s) whether to run a Mac command, open a site,
     answer from knowledge, or search, and clean up the search query."""
-    prompt = ROUTE.format(now=now or time.strftime("%Y-%m-%d %H:%M %A"), commands=commands or "(none)")
-    out = await _chat(prompt, spoken, 160, 1.4)
+    # Everything that changes per request goes in the user message, so the long instructions
+    # and catalog stay an identical prefix that the model server keeps cached.
+    # The model sees short aliases (c1, c2, ...) instead of ids like
+    # "rc:mattisssa/spotify-player/justPlay": every output token costs about 10 ms.
+    alias, lines = {}, []
+    for n, line in enumerate(l for l in commands.splitlines() if "|" in l):
+        cid, rest = line.split("|", 1)
+        alias[f"c{n + 1}"] = cid.strip()
+        lines.append(f"c{n + 1} |{rest}")
+    prompt = ROUTE.format(commands="\n".join(lines) or "(none)")
+    user = f"Now: {now or time.strftime('%Y-%m-%d %H:%M %A')}\nRequest: {spoken}"
+    out = await _chat(prompt, user, 120, 2.5)
     if not out:
         return None
     m = re.search(r"\{.*\}", out, re.S)
@@ -208,7 +217,8 @@ async def route(spoken: str, commands: str = "", now: str = "") -> dict | None:
     kind = r.get("kind")
     if kind == "command" and r.get("id"):
         args = r.get("args") if isinstance(r.get("args"), dict) else {}
-        return {"kind": "command", "id": str(r["id"]), "args": {str(k): str(v) for k, v in args.items()},
+        cid = alias.get(str(r["id"]).strip(), str(r["id"]))
+        return {"kind": "command", "id": cid, "args": {str(k): str(v) for k, v in args.items()},
                 "done": str(r.get("done") or "Done")[:60]}
     if kind == "open" and str(r.get("url", "")).startswith(("https://", "http://")):
         return {"kind": "open", "url": r["url"], "label": str(r.get("label") or host_of(r["url"]))[:40]}

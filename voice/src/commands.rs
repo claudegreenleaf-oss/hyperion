@@ -12,6 +12,8 @@ use crate::config::{self, log};
 struct Entry {
     line: String,
     mode: String,
+    /// Lowercase words from the id, titles and descriptions, for matching a request.
+    words: String,
 }
 
 fn entries() -> &'static HashMap<String, Entry> {
@@ -34,7 +36,7 @@ fn builtin() -> Vec<(&'static str, &'static str, &'static str)> {
 fn load() -> HashMap<String, Entry> {
     let mut map = HashMap::new();
     for (id, what, args) in builtin() {
-        map.insert(id.to_string(), Entry { line: format!("{id} | {what} | {args}"), mode: "builtin".into() });
+        map.insert(id.to_string(), Entry { line: format!("{id} | {what} | {args}"), mode: "builtin".into(), words: String::new() });
     }
     let dir = config::home().join(".config/raycast/extensions");
     for ext in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -43,6 +45,7 @@ fn load() -> HashMap<String, Entry> {
         let owner = pkg.get("owner").or_else(|| pkg.get("author")).and_then(|v| v.as_str()).unwrap_or("");
         let name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let ext_title = pkg.get("title").and_then(|v| v.as_str()).unwrap_or(name);
+        let ext_desc = pkg.get("description").and_then(|v| v.as_str()).unwrap_or("");
         if owner.is_empty() || name.is_empty() {
             continue;
         }
@@ -60,23 +63,63 @@ fn load() -> HashMap<String, Entry> {
                 .flatten()
                 .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
                 .collect();
+            let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let id = format!("rc:{owner}/{name}/{cmd}");
             let line = format!("{id} | {title} ({ext_title}) | {}", args.join(", "));
-            map.insert(id, Entry { line, mode: mode.to_string() });
+            let words = format!("{id} {title} {ext_title} {desc} {ext_desc}").to_lowercase();
+            map.insert(id, Entry { line, mode: mode.to_string(), words });
         }
     }
     log(format!("commands: {} available", map.len()));
     map
 }
 
-/// The catalog, one command per line, for the relay's router.
-pub fn catalog() -> &'static str {
-    static C: OnceLock<String> = OnceLock::new();
-    C.get_or_init(|| {
-        let mut lines: Vec<&str> = entries().values().map(|e| e.line.as_str()).collect();
-        lines.sort();
-        lines.join("\n")
-    })
+/// Warm the catalog (reads every installed Raycast extension once).
+pub fn catalog() -> usize {
+    entries().len()
+}
+
+const SYNONYMS: &[(&str, &[&str])] = &[
+    ("awake", &["caffeinate", "sleep"]),
+    ("sleep", &["caffeinate"]),
+    ("music", &["spotify", "play"]),
+    ("song", &["spotify", "track"]),
+    ("songs", &["spotify", "track"]),
+    ("pause", &["play", "spotify"]),
+    ("skip", &["next", "spotify"]),
+    ("remind", &["reminder"]),
+    ("note", &["notes"]),
+    ("wallpaper", &["wallpaper", "unsplash"]),
+];
+const SKIP: &[&str] = &["the", "and", "for", "my", "me", "to", "a", "an", "of", "on", "in", "it", "please", "can", "you", "turn", "set", "some", "with", "this", "that"];
+
+/// The commands worth showing the router for this request: the built-ins plus the Raycast
+/// commands whose names or descriptions share the most words with it. Sending all ~270 made
+/// every routing call take over a second; twenty-odd keeps it near 0.3 s.
+pub fn catalog_for(q: &str) -> String {
+    let mut words: Vec<String> = q
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1 && !SKIP.contains(w))
+        .map(String::from)
+        .collect();
+    for (w, extra) in SYNONYMS {
+        if words.iter().any(|x| x == w) {
+            words.extend(extra.iter().map(|s| s.to_string()));
+        }
+    }
+    let stems: Vec<String> = words.iter().map(|w| w.chars().take(5).collect()).collect();
+    let mut scored: Vec<(usize, &str)> = entries()
+        .iter()
+        .filter(|(id, _)| id.starts_with("rc:"))
+        .map(|(_, e)| (stems.iter().filter(|s| e.words.contains(s.as_str())).count(), e.line.as_str()))
+        .filter(|(n, _)| *n > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    let mut lines: Vec<&str> = entries().values().filter(|e| e.mode == "builtin").map(|e| e.line.as_str()).collect();
+    lines.sort();
+    lines.extend(scored.into_iter().take(12).map(|(_, l)| l));
+    lines.join("\n")
 }
 
 fn quote(s: &str) -> String {

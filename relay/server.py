@@ -531,8 +531,14 @@ async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = 
     model's knowledge, or search (with a cleaned-up query) and answer from the pages."""
     t0 = time.monotonic()
     sq = q
+    early = None
     if voice:
+        # Search the words as heard while the router decides; if it keeps the query (or the
+        # request turns out to be a command), no time was spent waiting for it.
+        early = asyncio.get_running_loop().create_task(_run_search(q, 8, 2, 8000, t0 + 4.5, True, t0))
         r = await ans.route(q, commands, now)
+        if r and r["kind"] != "search":
+            early.cancel()
         if r and r["kind"] == "command":
             await st.put({"type": "command", "id": r["id"], "args": r["args"], "done": r["done"]})
             await st.put({"type": "done"}, last=True)
@@ -550,8 +556,13 @@ async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = 
             sq = r["query"]
         await st.put({"type": "query", "q": sq})
     try:
-        # Two pages are enough for a short spoken answer and arrive sooner than three.
-        out = await _run_search(sq, 8, 2 if voice else 3, 8000, t0 + 4.5, True, t0)
+        if early is not None and not early.cancelled() and sq.lower().strip(" ?.") == q.lower().strip(" ?."):
+            out = await early
+        else:
+            if early is not None:
+                early.cancel()
+            # Two pages are enough for a short spoken answer and arrive sooner than three.
+            out = await _run_search(sq, 8, 2 if voice else 3, 8000, t0 + 4.5, True, t0)
     except SearchError as e:
         await st.put({"type": "error", "error": str(e)}, last=True)
         return
