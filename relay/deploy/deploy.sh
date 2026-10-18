@@ -1,0 +1,22 @@
+#!/bin/bash
+# Deploy the relay (and its opencode answer server) to scotus-vps. Run from the repo root.
+# Keeps a copy of the previous code so a bad deploy rolls back with one command.
+set -euo pipefail
+HOST=${HOST:-scotus-vps}
+cd "$(dirname "$0")/.."
+
+ssh "$HOST" 'set -e; cd /opt/hyperion-relay; ts=$(date +%Y%m%d-%H%M%S); mkdir -p backups; tar czf backups/relay-$ts.tgz relay; ls -t backups | tail -n +6 | xargs -r -I{} rm backups/{}'
+scp -q server.py answer.py answer.html "$HOST:/opt/hyperion-relay/relay/"
+scp -q deploy/hyperion-relay.service deploy/hyperion-opencode.service deploy/hyperion-relay.slice "$HOST:/etc/systemd/system/"
+ssh "$HOST" 'set -e
+mkdir -p /opt/hyperion-relay/opencode
+[ -x /root/.opencode/bin/opencode ] || curl -fsSL https://opencode.ai/install | bash >/dev/null
+/root/.opencode/bin/opencode --version'
+scp -q deploy/opencode.json "$HOST:/opt/hyperion-relay/opencode/opencode.json"
+ssh "$HOST" 'set -e
+systemctl daemon-reload
+systemctl enable --now hyperion-opencode >/dev/null 2>&1
+systemctl restart hyperion-opencode hyperion-relay
+for i in $(seq 1 20); do curl -fsS -m 2 http://100.104.232.110:8790/healthz >/dev/null 2>&1 && break; sleep 0.5; done
+curl -fsS -m 3 http://100.104.232.110:8790/healthz; echo
+systemctl is-active hyperion-relay hyperion-opencode hyperion-searxng'
