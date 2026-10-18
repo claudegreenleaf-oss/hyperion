@@ -354,27 +354,27 @@ pub fn init() {
         let _: () = msg_send![&*content, addSubview: &*title];
         let _: () = msg_send![&*content, addSubview: &*ear];
 
-        // The answer's headline sits on a highlight: a capsule in the waveform's colours, deep
-        // over the black, with a glint that crosses it once.
+        // The answer's headline sits on a highlight: a faint capsule tinted with the waveform's
+        // colours, with a soft glint that crosses it once.
         let mark = layer_view(rect(0.0, 0.0, 10.0, 10.0));
         let ml: *mut AnyObject = msg_send![&*mark, layer];
         let mark_fill: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
-        let hues: Vec<*mut AnyObject> = WAVE[..3].iter().map(|(r, g, b)| rgba(*r, *g, *b, 0.5)).collect();
+        let hues: Vec<*mut AnyObject> = WAVE[..3].iter().map(|(r, g, b)| rgba(*r, *g, *b, 0.22)).collect();
         let _: () = msg_send![mark_fill, setColors: cg_array(&hues)];
         let _: () = msg_send![mark_fill, setStartPoint: NSPoint::new(0.0, 0.5)];
         let _: () = msg_send![mark_fill, setEndPoint: NSPoint::new(1.0, 0.5)];
         let _: () = msg_send![mark_fill, setAnchorPoint: NSPoint::new(0.0, 0.5)];
         let _: () = msg_send![mark_fill, setMasksToBounds: true];
         let _: () = msg_send![mark_fill, setBorderWidth: 0.5f64];
-        let _: () = msg_send![mark_fill, setBorderColor: cg(white(0.16))];
+        let _: () = msg_send![mark_fill, setBorderColor: cg(white(0.13))];
         let glint: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
-        let _: () = msg_send![glint, setColors: cg_array(&[white(0.0), white(0.28), white(0.0)])];
+        let _: () = msg_send![glint, setColors: cg_array(&[white(0.0), white(0.12), white(0.0)])];
         let _: () = msg_send![glint, setStartPoint: NSPoint::new(0.0, 0.5)];
         let _: () = msg_send![glint, setEndPoint: NSPoint::new(1.0, 0.5)];
         let _: () = msg_send![mark_fill, addSublayer: glint];
         let _: () = msg_send![ml, addSublayer: mark_fill];
         let _: () = msg_send![&*content, addSubview: &*mark];
-        let hero = label(24.0, 0.3, 1.0, false);
+        let hero = label(20.0, 0.3, 1.0, false);
         let _: () = msg_send![&*hero, setWantsLayer: true];
         let _: () = msg_send![&*content, addSubview: &*hero];
         let body = label(15.0, 0.0, 0.94, true);
@@ -388,7 +388,7 @@ pub fn init() {
             let _: () = msg_send![pl, setCornerRadius: 10.0f64];
             let _: () = msg_send![pl, setBackgroundColor: cg(white(0.08))];
             let _: () = msg_send![pl, setBorderWidth: 0.5f64];
-            let _: () = msg_send![pl, setBorderColor: cg(white(0.1))];
+            let _: () = msg_send![pl, setBorderColor: cg(white(0.13))];
             let t = label(12.5, 0.0, 0.78, false);
             let _: () = msg_send![&*p, addSubview: &*t];
             let _: () = msg_send![&*content, addSubview: &*p];
@@ -579,7 +579,7 @@ unsafe fn later(anim: &AnyObject, delay: f64) {
 /// The highlight behind the headline: the capsule stretches out from a dot at the left, past its
 /// width and back, then a glint runs across it once.
 unsafe fn sweep(fill: *mut AnyObject, glint: *mut AnyObject, w: f64, h: f64, delay: f64) {
-    let anim = spring("bounds.size.width", 0.55, 0.38);
+    let anim = spring("bounds.size.width", 0.5, 0.2);
     let _: () = msg_send![&*anim, setFromValue: &*number(h)];
     let _: () = msg_send![&*anim, setToValue: &*number(w)];
     later(&anim, delay);
@@ -643,7 +643,7 @@ unsafe fn hero_fit(hero: &AnyObject, key: &str, max_w: f64) -> Option<NSSize> {
         return None;
     }
     let _: () = msg_send![hero, setStringValue: &*ns(key)];
-    for size in [24.0, 20.0] {
+    for size in [20.0, 17.0] {
         let _: () = msg_send![hero, setFont: font(size, 0.3)];
         let cell: *mut AnyObject = msg_send![hero, cell];
         let s: NSSize = msg_send![cell, cellSizeForBounds: rect(0.0, 0.0, 4000.0, 200.0)];
@@ -742,7 +742,10 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
         let w = 590.0;
         let inner = w - 2.0 * PAD;
         let left = (WIN_W - w) / 2.0 + PAD;
-        let (plain, spans, keys) = marked(text);
+        let (plain, mut spans, keys) = marked(text);
+        if spans.len() > 1 {
+            spans.clear();
+        }
 
         let ear_w = (w - n.notch_w) / 2.0 - PAD - 10.0;
         if !source.is_empty() && ear_w > 40.0 {
@@ -755,7 +758,7 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
         let hero = if spans.len() == 1 && !plain.contains('\n') { hero_fit(&n.hero, keys[0].trim(), inner - 32.0) } else { None };
         let mut capsule = (0.0, 0.0);
         if let Some(size) = hero {
-            let (cw, ch) = (size.width + 30.0, (size.height + 10.0).round());
+            let (cw, ch) = (size.width + 24.0, (size.height + 8.0).round());
             capsule = (cw, ch);
             let _: () = msg_send![&*n.mark, setFrame: rect(left, n.y(top, ch), cw, ch)];
             let _: () = msg_send![class!(CATransaction), begin];
@@ -766,7 +769,7 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
             let _: () = msg_send![n.glint, setBounds: rect(0.0, 0.0, 56.0, ch)];
             let _: () = msg_send![n.glint, setPosition: NSPoint::new(-40.0, ch / 2.0)];
             let _: () = msg_send![class!(CATransaction), commit];
-            let _: () = msg_send![&*n.hero, setFrame: rect(left + 15.0, n.y(top + (ch - size.height) / 2.0, size.height), size.width, size.height)];
+            let _: () = msg_send![&*n.hero, setFrame: rect(left + 12.0, n.y(top + (ch - size.height) / 2.0, size.height), size.width, size.height)];
             let _: () = msg_send![&*n.mark, setHidden: false];
             let _: () = msg_send![&*n.hero, setHidden: false];
             top += ch;
@@ -811,7 +814,7 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
         if hero.is_some() {
             // The headline pops in as the content arrives, and the highlight sweeps in behind it
             // a beat later, as if someone just marked it.
-            pop_from(&n.hero, 0.55, 0.5, 0.14);
+            pop_from(&n.hero, 0.88, 0.25, 0.14);
             sweep(n.mark_fill, n.glint, capsule.0, capsule.1, 0.2);
         }
     });
