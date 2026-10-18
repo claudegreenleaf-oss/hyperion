@@ -66,7 +66,7 @@ jobs:
 
   build_job_02:
     needs: build_job_01
-    if: ${{needs.build_job_01.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_01.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -76,7 +76,7 @@ jobs:
 
   build_job_03:
     needs: build_job_02
-    if: ${{needs.build_job_02.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_02.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -86,7 +86,7 @@ jobs:
 
   build_job_04:
     needs: build_job_03
-    if: ${{needs.build_job_03.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_03.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -96,7 +96,7 @@ jobs:
 
   build_job_05:
     needs: build_job_04
-    if: ${{needs.build_job_04.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_04.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -106,7 +106,7 @@ jobs:
 
   build_job_06:
     needs: build_job_05
-    if: ${{needs.build_job_05.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_05.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -116,7 +116,7 @@ jobs:
 
   build_job_07:
     needs: build_job_06
-    if: ${{needs.build_job_06.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_06.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -126,7 +126,7 @@ jobs:
 
   build_job_08:
     needs: build_job_07
-    if: ${{needs.build_job_07.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_07.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -136,7 +136,7 @@ jobs:
 
   build_job_09:
     needs: build_job_08
-    if: ${{needs.build_job_08.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_08.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
@@ -146,7 +146,7 @@ jobs:
 
   build_job_10:
     needs: build_job_09
-    if: ${{needs.build_job_09.outputs.status == 'running'}}
+    if: ${{ !failure() && !cancelled() && needs.build_job_09.outputs.status == 'running' }}
     uses: ./.github/workflows/build-phase.yml
     secrets: inherit
     with:
