@@ -20,6 +20,15 @@ from urllib.parse import urlsplit
 
 import httpx
 
+try:
+    import anthropic
+except ImportError:  # the relay still works on the local model without the SDK
+    anthropic = None
+
+# Claude Haiku understands loose, misheard speech and reads whole pages quickly; the a6000's Qwen
+# is the fallback when there is no API key or the API is unreachable.
+CLAUDE_MODEL = os.environ.get("RELAY_CLAUDE_MODEL", "claude-haiku-5-5")
+_claude = anthropic.AsyncAnthropic(max_retries=0) if anthropic and os.environ.get("ANTHROPIC_API_KEY") else None
 LLM = os.environ.get("RELAY_LLM", "")  # OpenAI-compatible base URL, e.g. https://a6000-box...:8993
 MODEL = os.environ.get("RELAY_LLM_MODEL", "qwen")
 MODEL_BUDGET_S = float(os.environ.get("RELAY_MODEL_BUDGET_S", "1.2"))
@@ -140,34 +149,67 @@ SYSTEM = ("You answer spoken questions for an answer panel, using the numbered w
           "nothing that answers the question.")
 
 
-async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
-    """One-line answer from the model, or None when it is slow or unavailable."""
-    if not _llm or not excerpts:
-        return None
-    user = f"Question: {q}\n\nExcerpts:\n" + "\n".join(
-        f"[{n + 1}] ({e['host']}) {e['text']}" for n, e in enumerate(excerpts))
+PAGE_SYSTEM = ("You answer spoken questions for a small answer panel on a Mac, from the numbered web pages you are "
+               "given. The question came from speech recognition, so read it for what was meant. Reply with only the "
+               "answer, as short as possible, no preamble: a single fact in one line; a list (essay prompts, steps, "
+               "options) one item per line, at most 8 items and 90 words. Prefer the most recent, most official source. "
+               "End with the number of the page it came from in brackets, like [2]. Reply exactly NEEDS_PAGE only if "
+               "the pages do not answer it.")
+
+
+async def model_answer(q: str, excerpts: list[dict], pages: list[dict] | None = None) -> dict | None:
+    """The answer for the panel. With Claude, it reads the top pages whole; otherwise the local
+    model gets the best excerpts (its prompt reading is too slow for whole pages)."""
     t0 = time.monotonic()
-    try:
-        r = await asyncio.wait_for(_llm.post(f"{LLM}/v1/chat/completions", json={
-            "model": MODEL, "max_tokens": 200, "temperature": 0,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
-        }), MODEL_BUDGET_S)
-        reply = (r.json()["choices"][0]["message"]["content"] or "").strip()
-    except (asyncio.TimeoutError, httpx.HTTPError, KeyError, IndexError, ValueError):
-        return None
+    reply = None
+    if _claude and pages:
+        user = f"Question: {q}\n\n" + "\n\n".join(
+            f"[{n + 1}] {p.get('title', '')} ({host_of(p.get('final_url') or p['url'])})\n{(p.get('text') or '')[:6000]}"
+            for n, p in enumerate(pages[:3]))
+        reply = await _claude_chat(PAGE_SYSTEM, user, 400, MODEL_BUDGET_S + 2.0)
+        refs = [{"url": p["url"], "host": host_of(p.get("final_url") or p["url"]), "text": ""} for p in pages[:3]]
+    if reply is None:
+        if not excerpts:
+            return None
+        user = f"Question: {q}\n\nExcerpts:\n" + "\n".join(
+            f"[{n + 1}] ({e['host']}) {e['text']}" for n, e in enumerate(excerpts))
+        reply = await _local_chat(SYSTEM, user, 200, MODEL_BUDGET_S)
+        refs = excerpts
     ms = round((time.monotonic() - t0) * 1000)
     if not reply or "NEEDS_PAGE" in reply:
-        return {"easy": False, "ms": ms}
+        return {"easy": False, "ms": ms} if reply else None
     m = REPLY_REF.search(reply)
     ref = int(m.group(1)) - 1 if m else 0
     short = REPLY_REF.sub("", reply).strip().strip('"').strip()
     if not short or len(short) > 900:
         return {"easy": False, "ms": ms}
-    return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0, "ms": ms}
+    ref = ref if 0 <= ref < len(refs) else 0
+    return {"easy": True, "short": short, "ref": ref, "url": refs[ref]["url"], "host": refs[ref]["host"],
+            "passage": refs[ref].get("text", ""), "ms": ms}
+
+
+async def _claude_chat(system: str, user: str, max_tokens: int, budget: float) -> str | None:
+    if not _claude:
+        return None
+    try:
+        r = await _claude.with_options(timeout=budget).messages.create(
+            model=CLAUDE_MODEL, max_tokens=max_tokens, thinking={"type": "disabled"},
+            system=system, messages=[{"role": "user", "content": user}])
+    except anthropic.APIError:
+        return None
+    if r.stop_reason == "refusal":
+        return None
+    return "".join(b.text for b in r.content if b.type == "text").strip() or None
 
 
 async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str | None:
+    out = await _claude_chat(system, user, max_tokens, budget)
+    if out is not None:
+        return out
+    return await _local_chat(system, user, max_tokens, budget)
+
+
+async def _local_chat(system: str, user: str, max_tokens: int, budget: float) -> str | None:
     if not _llm:
         return None
     try:

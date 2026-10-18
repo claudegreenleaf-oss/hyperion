@@ -6,6 +6,7 @@ Wants=hyperion-searxng.service
 [Service]
 Slice=hyperion-relay.slice
 WorkingDirectory=/opt/hyperion-relay/relay
+EnvironmentFile=-/etc/hyperion-relay/anthropic.env
 Environment=RELAY_LLM=https://a6000-box.tailb42ce9.ts.net:8993
 ExecStart=/opt/hyperion-relay/relay-venv/bin/uvicorn server:app --host 100.104.232.110 --port 8790 --no-access-log --timeout-keep-alive 300
 Restart=on-failure

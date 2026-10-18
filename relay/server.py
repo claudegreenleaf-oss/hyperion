@@ -581,11 +581,11 @@ async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = 
         await st.put({"type": "passage", "text": best["text"], "score": best["score"], "url": page["url"],
                       "host": ans.host_of(page.get("final_url", page["url"])), "title": page.get("title", "")})
     excerpts = [{"text": c["text"], "host": ans.host_of(got[c["i"]]["url"]), "url": got[c["i"]]["url"]} for c in picks[:5]]
-    m = await ans.model_answer(sq, excerpts)
+    m = await ans.model_answer(sq, excerpts, got)
     if m and m.get("easy"):
-        src = excerpts[m["ref"]]
-        ev = {"type": "answer", "easy": True, "short": m["short"], "url": src["url"], "host": src["host"],
-              "passage": src["text"], "by": "model", "model": ans.MODEL, "model_ms": m["ms"]}
+        ev = {"type": "answer", "easy": True, "short": m["short"], "url": m["url"], "host": m["host"],
+              "passage": m["passage"], "by": "model", "model": ans.CLAUDE_MODEL if ans._claude else ans.MODEL,
+              "model_ms": m["ms"]}
     elif best:
         easy = ans.heuristic_easy(sq, best) and m is None
         ev = {"type": "answer", "easy": easy, "short": best["text"], "url": excerpts[0]["url"],
@@ -627,7 +627,8 @@ async def answer(request: Request):
 
 async def healthz(request: Request):
     return _reply(request, {"ok": True, "pages_cached": len(pages.d), "inflight": len(inflight),
-                            "answers_cached": len(answers.d), "model": ans.MODEL if ans.LLM else None})
+                            "answers_cached": len(answers.d), "claude": ans.CLAUDE_MODEL if ans._claude else None,
+                            "local_model": ans.MODEL if ans.LLM else None})
 
 
 app = Starlette(routes=[
