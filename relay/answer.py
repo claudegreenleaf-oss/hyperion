@@ -1,5 +1,10 @@
 """Answer-first layer over the relay's search: pick the sentence that answers, then ask a
-small free model (through a local `opencode serve`) for a one-line answer.
+small model for a one-line answer.
+
+The model is the Qwen already serving Murmur and the voice assistant on a6000-box (vLLM,
+OpenAI-compatible, tailnet only): about 0.14 s for a one-line answer. opencode's free models
+were the first choice, but their free tier refuses every request that is not OpenCode's own
+unmodified agent, and that agent took over 40 s.
 
 The extracted sentence never waits on the model. The model only gets a short budget; if it
 is slow or unsure, the extracted sentence stands and the caller decides whether the answer
@@ -15,15 +20,15 @@ from urllib.parse import urlsplit
 
 import httpx
 
-OPENCODE = os.environ.get("RELAY_OPENCODE", "")  # e.g. http://127.0.0.1:4096
-MODEL = os.environ.get("RELAY_MODEL", "opencode/nemotron-3.5-lightning-free")
-AGENT = os.environ.get("RELAY_AGENT", "answer")
-MODEL_BUDGET_S = float(os.environ.get("RELAY_MODEL_BUDGET_S", "1.6"))
+LLM = os.environ.get("RELAY_LLM", "")  # OpenAI-compatible base URL, e.g. https://a6000-box...:8993
+MODEL = os.environ.get("RELAY_LLM_MODEL", "qwen")
+MODEL_BUDGET_S = float(os.environ.get("RELAY_MODEL_BUDGET_S", "1.2"))
 
 STOP = set("""a an the of to in on for at by with from and or but is are was were be been being do does did
 how what when where which who whom whose why can could should would will shall may might must it its this that
 these those there their they them i me my we our you your he she his her as if than then so not no yes vs
-about into over under up down out just only also any some all each per get got""".split())
+about into over under up down out just only also any some all each per get got many much have has had
+use used using way ways""".split())
 QUESTION = re.compile(r"^\s*(when|what|who|whom|whose|where|which|how (many|much|long|old|far|tall|big|fast)|"
                       r"is|are|was|were|does|do|did|can|could|define|meaning of)\b", re.I)
 WANTS_NUMBER = re.compile(r"\b(when|date|deadline|year|how (many|much|long|old|far|tall|big|fast)|"
@@ -60,42 +65,56 @@ def question_like(q: str) -> bool:
     return bool(QUESTION.match(q)) or q.strip().endswith("?")
 
 
-def best_sentences(q: str, pages: list[dict], k: int = 4) -> list[dict]:
-    """Score every sentence of the fetched pages against the query: share of query terms it
-    covers (weighted so rarer terms count more), a bonus when the query wants a number and the
-    sentence has one, and a small preference for higher-ranked pages and for brevity."""
+def _units(text: str) -> list[str]:
+    out = []
+    for raw in SENT_SPLIT.split(text[:20000]):
+        u = clean(raw)
+        if len(u) >= 3:
+            out.append(u)
+    return out
+
+
+def best_sentences(q: str, pages: list[dict], k: int = 5) -> list[dict]:
+    """Score windows of the fetched pages against the query. A window is a sentence or line
+    plus its short neighbours, so a heading like "November 1" travels with the line under it.
+    Score: share of query terms covered (rarer terms weigh more), a bonus when the query wants
+    a number and the window has one (a penalty when it has none), and small preferences for
+    higher-ranked pages and for brevity."""
     qt = list(dict.fromkeys(terms(q)))
     if not qt:
         return []
-    sents = []
-    df = {t: 0 for t in qt}
+    wins = []
     for pi, p in enumerate(pages):
-        text = p.get("text") or ""
-        for raw in SENT_SPLIT.split(text[:20000]):
-            s = clean(raw)
-            if 25 <= len(s) <= 400:
-                st = set(terms(s))
-                for t in qt:
-                    if t in st:
-                        df[t] += 1
-                sents.append((pi, s, st))
-    if not sents:
+        us = _units(p.get("text") or "")
+        for j, u in enumerate(us):
+            if len(u) < 20 and not DIGIT.search(u):
+                continue
+            parts = [u]
+            if j > 0 and len(us[j - 1]) <= 90:
+                parts.insert(0, us[j - 1])
+            if j + 1 < len(us) and len(us[j + 1]) <= 90:
+                parts.append(us[j + 1])
+            w = " · ".join(parts)
+            if 20 <= len(w) <= 480:
+                wins.append((pi, w, set(terms(w))))
+    if not wins:
         return []
-    n = len(sents)
-    w = {t: 1.0 + math.log((n + 1) / (df[t] + 1)) for t in qt}
-    total = sum(w.values())
+    n = len(wins)
+    df = {t: sum(1 for _, _, st in wins if t in st) for t in qt}
+    weight = {t: 1.0 + math.log((n + 1) / (df[t] + 1)) for t in qt}
+    total = sum(weight.values())
     wants_num = bool(WANTS_NUMBER.search(q))
     scored = []
-    for pi, s, st in sents:
-        cover = sum(w[t] for t in qt if t in st) / total
+    for pi, w, st in wins:
+        cover = sum(weight[t] for t in qt if t in st) / total
         if cover == 0:
             continue
         score = cover
-        if wants_num and DIGIT.search(s):
-            score += 0.15
+        if wants_num:
+            score += 0.25 if DIGIT.search(w) else -0.15
         score -= 0.04 * pi
-        score -= max(0, len(s) - 220) / 2000
-        scored.append({"score": round(score, 3), "text": s, "i": pi})
+        score -= max(0, len(w) - 260) / 1500
+        scored.append({"score": round(score, 3), "text": w, "i": pi})
     scored.sort(key=lambda x: -x["score"])
     out, seen = [], set()
     for c in scored:
@@ -112,7 +131,7 @@ def heuristic_easy(q: str, best: dict | None) -> bool:
     return bool(best) and question_like(q) and best["score"] >= 0.62 and len(best["text"]) <= 180
 
 
-_oc = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=1.0)) if OPENCODE else None
+_llm = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(5.0, connect=1.0)) if LLM else None
 REPLY_REF = re.compile(r"\s*\[(\d)\]\s*\.?\s*$")
 SYSTEM = ("You answer web search questions from the numbered excerpts you are given. Reply with only the answer, "
           "at most 15 words, no preamble, then the number of the excerpt it came from in brackets, like [2]. "
@@ -121,44 +140,30 @@ SYSTEM = ("You answer web search questions from the numbered excerpts you are gi
 
 
 async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
-    """One-line answer from the free model, or None when it is slow, unsure or unavailable."""
-    if not _oc or not excerpts:
+    """One-line answer from the model, or None when it is slow or unavailable."""
+    if not _llm or not excerpts:
         return None
-    body_text = f"Question: {q}\n\nExcerpts:\n" + "\n".join(
+    user = f"Question: {q}\n\nExcerpts:\n" + "\n".join(
         f"[{n + 1}] ({e['host']}) {e['text']}" for n, e in enumerate(excerpts))
-    provider, _, model = MODEL.partition("/")
     t0 = time.monotonic()
-    sid = None
     try:
-        r = await asyncio.wait_for(_oc.post(f"{OPENCODE}/session", json={"title": "answer"}), MODEL_BUDGET_S)
-        sid = r.json()["id"]
-        left = MODEL_BUDGET_S - (time.monotonic() - t0)
-        r = await asyncio.wait_for(_oc.post(f"{OPENCODE}/session/{sid}/message", json={
-            "agent": AGENT, "model": {"providerID": provider, "modelID": model}, "system": SYSTEM,
-            "parts": [{"type": "text", "text": body_text}],
-        }), max(0.2, left))
-        reply = " ".join(p.get("text", "") for p in r.json().get("parts", []) if p.get("type") == "text").strip()
-    except (asyncio.TimeoutError, httpx.HTTPError, KeyError, ValueError):
+        r = await asyncio.wait_for(_llm.post(f"{LLM}/v1/chat/completions", json={
+            "model": MODEL, "max_tokens": 48, "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        }), MODEL_BUDGET_S)
+        reply = (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except (asyncio.TimeoutError, httpx.HTTPError, KeyError, IndexError, ValueError):
         return None
-    finally:
-        if sid:
-            asyncio.get_running_loop().create_task(_forget(sid))
+    ms = round((time.monotonic() - t0) * 1000)
     if not reply or "NEEDS_PAGE" in reply:
-        return {"easy": False, "ms": round((time.monotonic() - t0) * 1000)}
+        return {"easy": False, "ms": ms}
     m = REPLY_REF.search(reply)
     ref = int(m.group(1)) - 1 if m else 0
     short = REPLY_REF.sub("", reply).strip().strip('"').strip()
     if not short or len(short) > 160:
-        return {"easy": False, "ms": round((time.monotonic() - t0) * 1000)}
-    return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0,
-            "ms": round((time.monotonic() - t0) * 1000)}
-
-
-async def _forget(sid: str):
-    try:
-        await _oc.delete(f"{OPENCODE}/session/{sid}")
-    except httpx.HTTPError:
-        pass
+        return {"easy": False, "ms": ms}
+    return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0, "ms": ms}
 
 
 class Stream:

@@ -117,7 +117,11 @@ function onEvent(ev, secs) {
   if (ev.type === "sources") { S.results = ev.results; S.t.sources = secs; renderSources(); }
   else if (ev.type === "pages") { S.pages = ev.pages; renderDoc(); }
   else if (ev.type === "passage") { S.passage = ev; S.t.passage = secs; renderAnswer(); renderDoc(); }
-  else if (ev.type === "answer") { S.answer = ev; S.t.answer = secs; renderAnswer(); }
+  else if (ev.type === "answer") {
+    S.answer = ev; S.t.answer = secs;
+    if (ev.passage) { S.passage = {text: ev.passage, url: ev.url, host: ev.host}; sel = srcIndexFor(ev.url); renderSources(); }
+    renderAnswer(); renderDoc();
+  }
   else if (ev.type === "done") { $("st").textContent = ""; }
   else if (ev.type === "error") { $("short").textContent = "No answer"; $("st").textContent = ev.error; }
 }
@@ -133,11 +137,11 @@ function renderAnswer() {
   const host = (a && a.host) || (p && p.host) || "";
   const r = S.results[srcIndexFor(url)] || {};
   $("meta").innerHTML = (r.official ? '<span class="chip ok">Official</span>' : "") + `<span>${esc(host)}</span>`;
-  const short = a && a.short ? clean(a.short) : (p ? clean(p.text) : "");
+  const short = a && a.short ? clean(a.short) : (p ? clean(p.text.split(" · ").join(" ")) : "");
   const el = $("short");
   el.textContent = short || "…";
   el.className = short.length > 42 ? "long" : "";
-  const sentence = p ? clean(p.text) : "";
+  const sentence = p ? clean(p.text.split(" · ").join(" ")) : "";
   $("sentence").textContent = sentence && sentence !== short ? sentence : "";
   const parts = [];
   if (S.t.passage) parts.push(`<span><b>${S.t.passage.toFixed(1)} s</b> sentence from the page</span>`);
@@ -161,16 +165,22 @@ function renderDoc() {
   if (!r) return;
   $("url").textContent = r.url;
   const pg = pageFor(r.url);
-  const hl = S.passage && S.passage.url === r.url ? clean(S.passage.text) : "";
+  // A passage is a line plus its short neighbours joined by " · "; mark each part.
+  const hl = S.passage && S.passage.url === r.url ? S.passage.text.split(" · ").map(clean).filter((x) => x.length > 2) : [];
   if (!pg) {
     $("docin").innerHTML = `<h1>${esc(r.title || r.host)}</h1><p>${esc(r.snippet || "")}</p><p class="muted">Not read yet. Press Enter to open it.</p>`;
     return;
   }
   const paras = pg.text.split(/\n{2,}/).map(clean).filter(Boolean).slice(0, 120);
-  let marked = false;
+  let first = true;
   const html = paras.map((t) => {
     let h = esc(t);
-    if (hl && !marked && t.includes(hl)) { h = h.replace(esc(hl), `<mark id="hit">${esc(hl)}</mark>`); marked = true; }
+    for (const part of hl) {
+      if (t.includes(part)) {
+        h = h.replace(esc(part), `<mark${first ? ' id="hit"' : ""}>${esc(part)}</mark>`);
+        first = false;
+      }
+    }
     return `<p>${h}</p>`;
   }).join("");
   $("docin").innerHTML = `<h1>${esc(pg.title || r.title || r.host)}</h1>` + html;
@@ -180,7 +190,8 @@ function renderDoc() {
 
 function fragmentUrl(r) {
   if (!S.passage || S.passage.url !== r.url) return r.url;
-  const w = clean(S.passage.text).split(" ");
+  const longest = S.passage.text.split(" · ").map(clean).sort((a, b) => b.length - a.length)[0] || "";
+  const w = longest.split(" ");
   const start = w.slice(0, 5).join(" "), end = w.length > 10 ? w.slice(-4).join(" ") : "";
   return r.url.split("#")[0] + "#:~:text=" + encodeURIComponent(start) + (end ? "," + encodeURIComponent(end) : "");
 }

@@ -1,12 +1,12 @@
 [Unit]
 Description=Hyperion agent search relay (tailnet :8790)
-After=network-online.target tailscaled.service hyperion-searxng.service hyperion-opencode.service
+After=network-online.target tailscaled.service hyperion-searxng.service
 Wants=hyperion-searxng.service
 
 [Service]
 Slice=hyperion-relay.slice
 WorkingDirectory=/opt/hyperion-relay/relay
-Environment=RELAY_OPENCODE=http://127.0.0.1:4096
+Environment=RELAY_LLM=https://a6000-box.tailb42ce9.ts.net:8993
 ExecStart=/opt/hyperion-relay/relay-venv/bin/uvicorn server:app --host 100.104.232.110 --port 8790 --no-access-log --timeout-keep-alive 300
 Restart=on-failure
 Nice=5
