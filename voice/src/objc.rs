@@ -1,5 +1,6 @@
 //! Small helpers over objc2: strings, main-thread dispatch, a Send wrapper for retained objects.
 
+use std::ffi::c_void;
 use std::sync::Mutex;
 
 use block2::RcBlock;
@@ -44,10 +45,22 @@ pub fn main_async<F: FnOnce() + Send + 'static>(f: F) {
     });
 }
 
-/// Run `f` on the main thread after `ms` milliseconds.
+extern "C" {
+    static _dispatch_main_q: u8;
+    fn dispatch_time(when: u64, delta: i64) -> u64;
+    fn dispatch_after_f(when: u64, queue: *const u8, context: *mut c_void, work: extern "C" fn(*mut c_void));
+}
+
+extern "C" fn run_later(context: *mut c_void) {
+    let f = unsafe { Box::from_raw(context as *mut Box<dyn FnOnce()>) };
+    autoreleasepool(|_| f());
+}
+
+/// Run `f` on the main thread after `ms` milliseconds (a GCD timer, no thread).
 pub fn main_after<F: FnOnce() + Send + 'static>(ms: u64, f: F) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-        main_async(f);
-    });
+    let f: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
+    unsafe {
+        let when = dispatch_time(0, ms as i64 * 1_000_000);
+        dispatch_after_f(when, std::ptr::addr_of!(_dispatch_main_q), Box::into_raw(f) as *mut c_void, run_later);
+    }
 }

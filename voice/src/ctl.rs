@@ -63,6 +63,9 @@ fn with<R>(f: impl FnOnce(&mut Ctl) -> R) -> R {
     C.with(|c| f(&mut c.borrow_mut()))
 }
 
+/// How long the transcript must stay unchanged to count as the end of the question.
+const SETTLED_MS: u64 = 800;
+
 fn set_phase(c: &mut Ctl, p: Phase) {
     c.phase = p;
     PHASE.store(
@@ -152,6 +155,14 @@ pub fn on_speech(gen: u64, text: String, fin: bool) {
             if !heard.is_empty() {
                 notch::transcript(&heard);
                 maybe_prefetch(&heard);
+                // With music or a video playing the room never goes quiet, so the question also
+                // ends once the words stop changing.
+                main_after(SETTLED_MS, move || {
+                    if with(|c| c.gen == gen && c.phase == Phase::Listening && c.heard == heard) {
+                        log("ctl: transcript settled");
+                        on_end_of_speech(true);
+                    }
+                });
             }
         }
         Phase::Listening | Phase::Finishing if fin => ask(gen),
