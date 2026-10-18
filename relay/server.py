@@ -526,13 +526,17 @@ async def fetch(request: Request):
 answers = TTLCache(300, 10 * 60)
 
 
-async def _produce(q: str, st: ans.Stream, voice: bool = False):
+async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = "", now: str = ""):
     """Fill one answer stream. Spoken requests are routed first: open a site, answer from the
     model's knowledge, or search (with a cleaned-up query) and answer from the pages."""
     t0 = time.monotonic()
     sq = q
     if voice:
-        r = await ans.route(q)
+        r = await ans.route(q, commands, now)
+        if r and r["kind"] == "command":
+            await st.put({"type": "command", "id": r["id"], "args": r["args"], "done": r["done"]})
+            await st.put({"type": "done"}, last=True)
+            return
         if r and r["kind"] == "open":
             await st.put({"type": "open", "url": r["url"], "label": r["label"]})
             await st.put({"type": "done"}, last=True)
@@ -595,7 +599,8 @@ async def answer(request: Request):
     if st is None:
         st = ans.Stream()
         answers.put(key, st)
-        asyncio.get_running_loop().create_task(_produce(q, st, bool(d.get("voice"))))
+        asyncio.get_running_loop().create_task(_produce(
+            q, st, bool(d.get("voice")), str(d.get("commands", ""))[:20000], str(d.get("now", ""))[:40]))
     if d.get("prefetch"):
         return Response(status_code=204)
     texts = bool(d.get("texts"))

@@ -5,6 +5,7 @@
 
 mod audio;
 mod browser;
+mod commands;
 mod config;
 mod ctl;
 mod notch;
@@ -51,6 +52,10 @@ fn main() {
             return;
         }
         notch::init();
+        // Read the Raycast catalog once, off the main thread, before the first question.
+        std::thread::spawn(|| {
+            let _ = commands::catalog();
+        });
 
         // Microphone first, then speech recognition, then start listening (ctl::on_ready).
         let media = ns("soun"); // AVMediaTypeAudio

@@ -133,11 +133,11 @@ def heuristic_easy(q: str, best: dict | None) -> bool:
 
 _llm = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(5.0, connect=1.0)) if LLM else None
 REPLY_REF = re.compile(r"\s*\[(\d)\]\s*\.?\s*$")
-SYSTEM = ("You answer spoken questions for a small answer panel, using the numbered web excerpts you are given. "
-          "Reply with only the answer: as short as possible, never more than 35 words, no preamble, then the number "
-          "of the excerpt it came from in brackets, like [2]. Reply exactly NEEDS_PAGE when the excerpts do not "
-          "actually answer what was asked (mentioning the topic is not enough), or when the question asks for a "
-          "list of several items, such as essay prompts, steps or options.")
+SYSTEM = ("You answer spoken questions for an answer panel, using the numbered web excerpts you are given. "
+          "Reply with only the answer, as short as possible, no preamble. A single fact: one line. A list (essay "
+          "prompts, steps, options): one item per line, at most 8 items, at most 90 words in all. End with the number "
+          "of the excerpt it came from in brackets, like [2]. Reply exactly NEEDS_PAGE only when the excerpts contain "
+          "nothing that answers the question.")
 
 
 async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
@@ -149,7 +149,7 @@ async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
     t0 = time.monotonic()
     try:
         r = await asyncio.wait_for(_llm.post(f"{LLM}/v1/chat/completions", json={
-            "model": MODEL, "max_tokens": 80, "temperature": 0,
+            "model": MODEL, "max_tokens": 200, "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
         }), MODEL_BUDGET_S)
@@ -162,7 +162,7 @@ async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
     m = REPLY_REF.search(reply)
     ref = int(m.group(1)) - 1 if m else 0
     short = REPLY_REF.sub("", reply).strip().strip('"').strip()
-    if not short or len(short) > 260:
+    if not short or len(short) > 900:
         return {"easy": False, "ms": ms}
     return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0, "ms": ms}
 
@@ -181,16 +181,21 @@ async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str |
         return None
 
 
-ROUTE = """You route requests spoken to a browser's voice assistant. Today is {today}. Reply with one JSON object only.
-{{"kind":"open","url":"https://...","label":"Site name"}} when the user wants to go to a website or web app ("open YouTube", "go to my Gmail", "pull up the New York Times").
-{{"kind":"answer","answer":"..."}} when you are certain of the answer from general knowledge and it cannot have changed recently: arithmetic, unit conversions, definitions, spelling, settled facts. At most 35 words.
-{{"kind":"search","query":"..."}} for everything else: anything current, local, about dates, deadlines, schedules, prices, scores, news, people's current roles, or anything you are not sure of. The query is a short web search query; fix words that speech recognition probably misheard: about colleges and admissions, "REI" or "RAE" means REA (Restrictive Early Action) and "supplements" means supplemental essays; also EA, ED, RD, Common App."""
+ROUTE = """You route requests spoken to a Mac's voice assistant. Now: {now}. Reply with one JSON object only.
+{{"kind":"command","id":"<an id from COMMANDS>","args":{{...}},"done":"what you did, 2 to 6 words"}} when the user wants the Mac to do something one of the COMMANDS does (open an app, change brightness or volume, set a reminder, control music, ...). Use the argument names listed for that command; give times as local ISO 8601 like 2026-10-19T09:00.
+{{"kind":"open","url":"https://...","label":"Site name"}} when the user wants to go to a website or web app ("open YouTube", "go to my Gmail"). Apps installed on the Mac are commands, not websites.
+{{"kind":"answer","answer":"..."}} when you are certain of the answer from general knowledge and it cannot have changed recently: arithmetic, unit conversions, definitions, spelling, settled facts. At most 60 words; lists one item per line.
+{{"kind":"search","query":"..."}} for any other question: anything current, local, about dates, deadlines, schedules, prices, scores, news, people's current roles, or anything you are not sure of. The query is a short web search query; fix words speech recognition probably misheard: about colleges and admissions, "REI" or "RAE" means REA (Restrictive Early Action) and "supplements" means supplemental essays.
+
+COMMANDS (id | what it does | arguments):
+{commands}"""
 
 
-async def route(spoken: str) -> dict | None:
-    """Decide in one quick model call (about 0.3 s) whether to open a site, answer from
-    knowledge, or search, and clean up the search query."""
-    out = await _chat(ROUTE.format(today=time.strftime("%Y-%m-%d")), spoken, 90, 1.0)
+async def route(spoken: str, commands: str = "", now: str = "") -> dict | None:
+    """Decide in one quick model call (about 0.3 s) whether to run a Mac command, open a site,
+    answer from knowledge, or search, and clean up the search query."""
+    prompt = ROUTE.format(now=now or time.strftime("%Y-%m-%d %H:%M %A"), commands=commands or "(none)")
+    out = await _chat(prompt, spoken, 160, 1.4)
     if not out:
         return None
     m = re.search(r"\{.*\}", out, re.S)
@@ -201,9 +206,13 @@ async def route(spoken: str) -> dict | None:
     except ValueError:
         return None
     kind = r.get("kind")
+    if kind == "command" and r.get("id"):
+        args = r.get("args") if isinstance(r.get("args"), dict) else {}
+        return {"kind": "command", "id": str(r["id"]), "args": {str(k): str(v) for k, v in args.items()},
+                "done": str(r.get("done") or "Done")[:60]}
     if kind == "open" and str(r.get("url", "")).startswith(("https://", "http://")):
         return {"kind": "open", "url": r["url"], "label": str(r.get("label") or host_of(r["url"]))[:40]}
-    if kind == "answer" and r.get("answer") and len(str(r["answer"])) <= 260:
+    if kind == "answer" and r.get("answer") and len(str(r["answer"])) <= 600:
         return {"kind": "answer", "answer": str(r["answer"]).strip()}
     if kind == "search" and r.get("query"):
         return {"kind": "search", "query": str(r["query"]).strip()[:150]}

@@ -37,6 +37,7 @@ struct Ctl {
     bounds: Option<(f64, f64, f64, f64)>,
     passage: Option<(String, String)>,
     search_q: String,
+    sources: Vec<(String, String)>,
     decided: bool,
 }
 
@@ -53,6 +54,7 @@ thread_local! {
         bounds: None,
         passage: None,
         search_q: String::new(),
+        sources: Vec::new(),
         decided: false,
     });
 }
@@ -114,6 +116,7 @@ pub fn on_wake() {
         c.prefetched.clear();
         c.passage = None;
         c.search_q.clear();
+        c.sources.clear();
         c.bounds = None;
         c.decided = false;
         c.woke_at = Instant::now();
@@ -243,40 +246,85 @@ fn on_relay(gen: u64, ev: Value) {
     match ty {
         "passage" => with(|c| c.passage = Some((s("text"), s("host")))),
         "query" => with(|c| c.search_q = s("q")),
+        "sources" => {
+            let rows: Vec<(String, String)> = ev
+                .get("results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(3)
+                .map(|r| {
+                    let g = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                    (format!("{}  ·  {}", g("host"), g("title")), g("url"))
+                })
+                .collect();
+            with(|c| c.sources = rows);
+        }
         "open" => {
             log(format!("ctl: open {} ({})", s("url"), s("label")));
             open_url(gen, s("url"));
+        }
+        "command" => {
+            let id = s("id");
+            let done = s("done");
+            let args: std::collections::HashMap<String, String> = ev
+                .get("args")
+                .and_then(Value::as_object)
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect())
+                .unwrap_or_default();
+            with(|c| c.decided = true);
+            std::thread::spawn(move || {
+                let res = crate::commands::run(&id, &args);
+                crate::objc::main_async(move || match res {
+                    Ok(()) => finish_with(gen, &done, 1600),
+                    Err(e) => {
+                        log(format!("ctl: command failed: {e}"));
+                        finish_with(gen, &format!("Couldn't: {e}"), 3000);
+                    }
+                });
+            });
         }
         "answer" => {
             let easy = ev.get("easy").and_then(Value::as_bool).unwrap_or(false);
             let short = s("short");
             let ms = with(|c| c.asked_at.elapsed().as_millis());
             log(format!("ctl: answer easy={easy} by={} in {ms} ms: {short:?}", s("by")));
-            if easy && !short.is_empty() && short.chars().count() <= 260 {
+            if easy && !short.is_empty() {
                 show_answer(gen, &short, &s("host"));
             } else {
-                to_browser(gen);
+                show_best_effort(gen);
             }
         }
-        "error" => to_browser(gen),
+        "error" => show_best_effort(gen),
         _ => {}
     }
 }
 
 fn decide_timeout(gen: u64) {
     if with(|c| c.gen == gen && c.phase == Phase::Thinking && !c.decided) {
-        log("ctl: no answer in time, handing off to the browser");
-        to_browser(gen);
+        log("ctl: no answer in time; showing what we have");
+        show_best_effort(gen);
     }
 }
 
-fn show_answer(gen: u64, short: &str, host: &str) {
-    with(|c| {
+/// Everything stays in the notch: with no direct answer, show the best passage (or a note)
+/// and the top results to click.
+fn show_best_effort(gen: u64) {
+    let (text, host) = with(|c| match &c.passage {
+        Some((t, h)) if !t.is_empty() => (t.replace(" · ", "\n"), h.clone()),
+        _ => (if c.sources.is_empty() { "No answer found".to_string() } else { "No direct answer. Top results:".to_string() }, String::new()),
+    });
+    show_answer(gen, &text, &host);
+}
+
+fn show_answer(gen: u64, text: &str, host: &str) {
+    let rows = with(|c| {
         c.decided = true;
         set_phase(c, Phase::Showing);
+        c.sources.clone()
     });
-    notch::answer(short, host);
-    let dwell = (4000 + 55 * short.chars().count() as u64).min(11000);
+    notch::answer(text, host, &rows);
+    let dwell = (5000 + 45 * text.chars().count() as u64).min(25000);
     main_after(dwell, move || {
         if with(|c| c.gen == gen && c.phase == Phase::Showing) {
             notch::collapse();
@@ -285,10 +333,19 @@ fn show_answer(gen: u64, short: &str, host: &str) {
     });
 }
 
-/// The notch can't hold this one: Google results for the (cleaned-up) query.
-fn to_browser(gen: u64) {
-    let q = with(|c| if c.search_q.is_empty() { c.query.clone() } else { c.search_q.clone() });
-    open_url(gen, browser::google(&q));
+/// A short confirmation in the notch, then fold away.
+fn finish_with(gen: u64, text: &str, ms: u64) {
+    if with(|c| c.gen != gen) {
+        return;
+    }
+    with(|c| set_phase(c, Phase::Showing));
+    notch::done(text);
+    main_after(ms, move || {
+        if with(|c| c.gen == gen && c.phase == Phase::Showing) {
+            notch::collapse();
+            reset(gen);
+        }
+    });
 }
 
 /// Grow the notch into the browser window and open `url` there.
@@ -305,11 +362,18 @@ fn open_url(gen: u64, url: String) {
     main_after(700, move || reset(gen));
 }
 
-/// Click on the notch: open the full page for the answer showing, or dismiss while listening.
-pub fn on_click() {
+/// Click on the notch: a source row opens in the browser; anywhere else folds the notch away
+/// (or cancels while listening).
+pub fn on_click(x: f64, y: f64) {
     let (phase, gen) = with(|c| (c.phase, c.gen));
     match phase {
-        Phase::Showing => to_browser(gen),
+        Phase::Showing => match notch::row_at(x, y) {
+            Some(url) => open_url(gen, url),
+            None => {
+                notch::collapse();
+                reset(gen);
+            }
+        },
         Phase::Listening | Phase::Finishing => {
             speech::cancel();
             notch::collapse();

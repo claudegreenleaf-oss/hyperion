@@ -20,12 +20,24 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+fn now() -> String {
+    std::process::Command::new("/bin/date")
+        .arg("+%Y-%m-%d %H:%M %A")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn body(q: &str, prefetch: bool) -> Value {
+    json!({"q": q, "voice": true, "prefetch": prefetch, "now": now(), "commands": crate::commands::catalog()})
+}
+
 /// Start the relay working on a query we might ask (a partial transcript), so the pages it
 /// fetches are cached by the time the real question arrives.
 pub fn prefetch(q: String) {
     std::thread::spawn(move || {
         let url = format!("{}/v1/answer", config::get().relay);
-        let _ = agent().post(&url).send_json(json!({"q": q, "prefetch": true, "voice": true}));
+        let _ = agent().post(&url).send_json(body(&q, true));
     });
 }
 
@@ -33,7 +45,7 @@ pub fn prefetch(q: String) {
 pub fn ask(q: String, on_event: fn(u64, Value), gen: u64) {
     std::thread::spawn(move || {
         let url = format!("{}/v1/answer", config::get().relay);
-        let resp = match agent().post(&url).send_json(json!({"q": q, "voice": true})) {
+        let resp = match agent().post(&url).send_json(body(&q, false)) {
             Ok(r) => r,
             Err(e) => {
                 log(format!("relay: {e}"));

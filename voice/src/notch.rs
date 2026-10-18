@@ -34,12 +34,16 @@ struct Notch {
     dot: Retained<AnyObject>,
     title: Retained<AnyObject>,
     sub: Retained<AnyObject>,
+    rows: Vec<Retained<AnyObject>>,
+    row_urls: Vec<String>,
+    row_rects: Vec<NSRect>,
     screen: NSRect,
     primary_h: f64,
     notch_w: f64,
     notch_h: f64,
     shown: bool,
     seq: u64,
+    showing_rows: bool,
 }
 
 thread_local! {
@@ -145,18 +149,27 @@ pub fn init() {
         let _: () = msg_send![&*dot, setAutoresizingMask: 1usize | 4 | 8];
         pulse(dl);
 
-        let title = label(16.0, 0.23, "white", 4);
+        let title = label(15.0, 0.23, "white", 16);
         let sub = label(12.0, 0.0, "gray", 1);
         let _: () = msg_send![&*root, addSubview: &*dot];
         let _: () = msg_send![&*root, addSubview: &*title];
         let _: () = msg_send![&*root, addSubview: &*sub];
+        let mut rows = Vec::new();
+        for _ in 0..3 {
+            let r = label(13.0, 0.0, "white", 1);
+            let _: () = msg_send![&*r, setHidden: true];
+            let _: () = msg_send![&*root, addSubview: &*r];
+            rows.push(r);
+        }
 
         // Clicks on the panel arrive through a local monitor (no subclass needed).
         let pptr = Retained::as_ptr(&panel) as usize;
         let handler = RcBlock::new(move |ev: *mut AnyObject| -> *mut AnyObject {
             let w: *mut AnyObject = msg_send![ev, window];
             if w as usize == pptr {
-                main_async(ctl::on_click);
+                let p: NSPoint = msg_send![ev, locationInWindow];
+                let (x, y) = (p.x, p.y);
+                main_async(move || ctl::on_click(x, y));
             }
             ev
         });
@@ -171,12 +184,16 @@ pub fn init() {
                 dot,
                 title,
                 sub,
+                rows,
+                row_urls: Vec::new(),
+                row_rects: Vec::new(),
                 screen: frame,
                 primary_h: pf.size.height,
                 notch_w,
                 notch_h,
                 shown: false,
                 seq: 0,
+                showing_rows: false,
             })
         });
     }
@@ -205,27 +222,45 @@ impl Notch {
         self.frame_for(self.notch_w, self.notch_h)
     }
 
-    /// Lay the text out in the panel's current (final) frame.
-    unsafe fn layout(&self, title_lines: f64, show_dot: bool) {
+    /// Lay the text out in the panel's current (final) frame: title, the line under it, then
+    /// up to three clickable source rows.
+    unsafe fn layout(&mut self, title_lines: f64, show_dot: bool) {
         let cur: NSRect = msg_send![&*self.panel, frame];
         let (w, h) = (cur.size.width, cur.size.height);
         let pad = 24.0;
         let x0 = if show_dot { pad + 18.0 } else { pad };
         let tw = (w - x0 - pad).max(10.0);
-        let title_h = 21.0 * title_lines;
+        let title_h = 20.0 * title_lines;
         let top = self.notch_h + 10.0;
+        let _: () = msg_send![&*self.title, setMaximumNumberOfLines: title_lines as isize];
         let _: () = msg_send![&*self.title, setFrame: rect(x0, h - top - title_h, tw, title_h)];
-        let _: () = msg_send![&*self.sub, setFrame: rect(x0, h - top - title_h - 19.0, tw, 16.0)];
+        let _: () = msg_send![&*self.sub, setFrame: rect(x0, h - top - title_h - 20.0, tw, 16.0)];
         let _: () = msg_send![&*self.dot, setFrame: rect(pad, h - top - 14.0, 8.0, 8.0)];
         let _: () = msg_send![&*self.dot, setHidden: !show_dot];
         let _: () = msg_send![&*self.title, setHidden: false];
         let _: () = msg_send![&*self.sub, setHidden: false];
+        self.row_rects.clear();
+        let mut y = h - top - title_h - 20.0 - 10.0;
+        for (i, r) in self.rows.iter().enumerate() {
+            if i < self.row_urls.len() {
+                y -= 22.0;
+                let fr = rect(x0, y, tw, 18.0);
+                let _: () = msg_send![&**r, setFrame: fr];
+                let _: () = msg_send![&**r, setHidden: false];
+                self.row_rects.push(fr);
+            } else {
+                let _: () = msg_send![&**r, setHidden: true];
+            }
+        }
     }
 
     unsafe fn hide_text(&self) {
         let _: () = msg_send![&*self.title, setHidden: true];
         let _: () = msg_send![&*self.sub, setHidden: true];
         let _: () = msg_send![&*self.dot, setHidden: true];
+        for r in &self.rows {
+            let _: () = msg_send![&**r, setHidden: true];
+        }
     }
 
     /// Animate the panel to `to`; afterwards (on a fresh main-loop turn) run `done` unless a
@@ -260,6 +295,10 @@ impl Notch {
     /// Hide the text, grow or shrink to `target`, then show the text laid out for it.
     unsafe fn transition(&mut self, target: NSRect, secs: f64, title: &str, sub: &str, lines: f64, dot: bool) {
         self.ensure_shown();
+        if !self.showing_rows {
+            self.row_urls.clear();
+        }
+        self.showing_rows = false;
         self.hide_text();
         self.set_text(title, sub);
         self.animate(target, secs, Box::new(move || {
@@ -311,14 +350,43 @@ pub fn thinking(query: &str) {
     });
 }
 
-/// The answer: grow just enough to show it (up to four lines).
-pub fn answer(short: &str, source: &str) {
+fn line_count(text: &str) -> f64 {
+    text.split('\n').map(|l| ((l.chars().count().max(1) as f64) / 66.0).ceil()).sum::<f64>().clamp(1.0, 16.0)
+}
+
+/// The answer: grow just enough to show it, with up to three sources (label, url) to click.
+pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
     with(|n| unsafe {
-        let lines = ((short.chars().count() as f64) / 62.0).ceil().clamp(1.0, 4.0);
-        let target = n.frame_for(ANSWER_W, n.notch_h + 50.0 + 21.0 * lines);
-        let sub = if source.is_empty() { "click for Google results".to_string() } else { format!("{source}  ·  click for Google results") };
-        n.transition(target, 0.24, short, &sub, lines, false);
+        let lines = line_count(text);
+        let shown = rows.len().min(3);
+        let rows_h = if shown > 0 { 10.0 + 22.0 * shown as f64 } else { 0.0 };
+        let target = n.frame_for(ANSWER_W, n.notch_h + 10.0 + 20.0 * lines + 20.0 + rows_h + 18.0);
+        n.row_urls = rows.iter().take(3).map(|(_, u)| u.clone()).collect();
+        for (r, (label, _)) in n.rows.iter().zip(rows.iter()) {
+            let _: () = msg_send![&**r, setStringValue: &*ns(&format!("↗  {label}"))];
+        }
+        n.showing_rows = true;
+        n.transition(target, 0.24, text, source, lines, false);
     });
+}
+
+/// A command ran: a short confirmation.
+pub fn done(text: &str) {
+    with(|n| unsafe {
+        let target = n.frame_for(LISTEN_W, n.notch_h + 52.0);
+        n.transition(target, 0.2, &format!("✓  {text}"), "", 1.0, false);
+    });
+}
+
+/// Which source row, if any, is under a click (window coordinates).
+pub fn row_at(x: f64, y: f64) -> Option<String> {
+    with(|n| {
+        n.row_rects.iter().zip(n.row_urls.iter()).find_map(|(r, u)| {
+            (x >= r.origin.x && x <= r.origin.x + r.size.width && y >= r.origin.y - 2.0 && y <= r.origin.y + r.size.height + 2.0)
+                .then(|| u.clone())
+        })
+    })
+    .flatten()
 }
 
 /// Grow into the browser window's frame (AppleScript bounds: left, top, right, bottom from the
