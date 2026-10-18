@@ -1,0 +1,15 @@
+[Unit]
+Description=opencode server for the relay's one-line answers (127.0.0.1:4096)
+After=network-online.target
+
+[Service]
+Slice=hyperion-relay.slice
+WorkingDirectory=/opt/hyperion-relay/opencode
+Environment=HOME=/root
+ExecStart=/root/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4096
+Restart=always
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
