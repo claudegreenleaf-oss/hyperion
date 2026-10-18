@@ -133,10 +133,11 @@ def heuristic_easy(q: str, best: dict | None) -> bool:
 
 _llm = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(5.0, connect=1.0)) if LLM else None
 REPLY_REF = re.compile(r"\s*\[(\d)\]\s*\.?\s*$")
-SYSTEM = ("You answer web search questions from the numbered excerpts you are given. Reply with only the answer, "
-          "at most 15 words, no preamble, then the number of the excerpt it came from in brackets, like [2]. "
-          "If the excerpts do not clearly answer the question, or the answer needs more than one sentence, "
-          "reply exactly NEEDS_PAGE.")
+SYSTEM = ("You answer spoken questions for a small answer panel, using the numbered web excerpts you are given. "
+          "Reply with only the answer: as short as possible, never more than 35 words, no preamble, then the number "
+          "of the excerpt it came from in brackets, like [2]. Reply exactly NEEDS_PAGE when the excerpts do not "
+          "actually answer what was asked (mentioning the topic is not enough), or when the question asks for a "
+          "list of several items, such as essay prompts, steps or options.")
 
 
 async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
@@ -148,7 +149,7 @@ async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
     t0 = time.monotonic()
     try:
         r = await asyncio.wait_for(_llm.post(f"{LLM}/v1/chat/completions", json={
-            "model": MODEL, "max_tokens": 48, "temperature": 0,
+            "model": MODEL, "max_tokens": 80, "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
         }), MODEL_BUDGET_S)
@@ -161,18 +162,9 @@ async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
     m = REPLY_REF.search(reply)
     ref = int(m.group(1)) - 1 if m else 0
     short = REPLY_REF.sub("", reply).strip().strip('"').strip()
-    if not short or len(short) > 160:
+    if not short or len(short) > 260:
         return {"easy": False, "ms": ms}
     return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0, "ms": ms}
-
-
-COMPUTE = re.compile(r"^\s*(what('s| is)\s+)?(\d[\d,.\s]*\s*([-+*/x^%]|plus|minus|times|divided by|percent of)\s*\d|"
-                     r"(the\s+)?(square root|cube root|log|sin|cos|tan)\b|\d[\d,.]*\s*(°?[fc]|degrees|miles|km|kg|lbs?|pounds|"
-                     r"feet|ft|meters|inches|cups|ounces|oz|liters|gallons)\s+(in|to)\s+)", re.I)
-
-
-def is_computation(q: str) -> bool:
-    return bool(COMPUTE.search(q))
 
 
 async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str | None:
@@ -189,27 +181,33 @@ async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str |
         return None
 
 
-REWRITE = ("Turn the spoken question into a short web search query of 3 to 9 words. Speech recognition may have "
-           "misheard words: fix them when the context makes the intended word clear (college admissions: REA, EA, "
-           "ED, RD, Common App, supplemental essays; school: AP, SAT, FAFSA). Keep names and numbers. "
-           "Reply with only the query.")
+ROUTE = """You route requests spoken to a browser's voice assistant. Today is {today}. Reply with one JSON object only.
+{{"kind":"open","url":"https://...","label":"Site name"}} when the user wants to go to a website or web app ("open YouTube", "go to my Gmail", "pull up the New York Times").
+{{"kind":"answer","answer":"..."}} when you are certain of the answer from general knowledge and it cannot have changed recently: arithmetic, unit conversions, definitions, spelling, settled facts. At most 35 words.
+{{"kind":"search","query":"..."}} for everything else: anything current, local, about dates, deadlines, schedules, prices, scores, news, people's current roles, or anything you are not sure of. The query is a short web search query; fix words that speech recognition probably misheard: about colleges and admissions, "REI" or "RAE" means REA (Restrictive Early Action) and "supplements" means supplemental essays; also EA, ED, RD, Common App."""
 
 
-async def search_query(spoken: str) -> str | None:
-    """A clean search query from a spoken question (about 0.15 s)."""
-    out = await _chat(REWRITE, spoken, 24, 0.8)
-    if not out or len(out) > 120 or "\n" in out:
+async def route(spoken: str) -> dict | None:
+    """Decide in one quick model call (about 0.3 s) whether to open a site, answer from
+    knowledge, or search, and clean up the search query."""
+    out = await _chat(ROUTE.format(today=time.strftime("%Y-%m-%d")), spoken, 90, 1.0)
+    if not out:
         return None
-    return out.strip().strip('"').strip()
-
-
-async def direct_answer(q: str) -> str | None:
-    """Arithmetic and unit conversions need no search."""
-    out = await _chat("Answer the arithmetic or unit conversion with only the result, at most 10 words. "
-                      "If it is not arithmetic or a unit conversion, reply exactly NO.", q, 24, 0.8)
-    if not out or out.upper().startswith("NO") or len(out) > 80:
+    m = re.search(r"\{.*\}", out, re.S)
+    if not m:
         return None
-    return out
+    try:
+        r = __import__("json").loads(m.group(0))
+    except ValueError:
+        return None
+    kind = r.get("kind")
+    if kind == "open" and str(r.get("url", "")).startswith(("https://", "http://")):
+        return {"kind": "open", "url": r["url"], "label": str(r.get("label") or host_of(r["url"]))[:40]}
+    if kind == "answer" and r.get("answer") and len(str(r["answer"])) <= 260:
+        return {"kind": "answer", "answer": str(r["answer"]).strip()}
+    if kind == "search" and r.get("query"):
+        return {"kind": "search", "query": str(r["query"]).strip()[:150]}
+    return None
 
 
 class Stream:

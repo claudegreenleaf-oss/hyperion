@@ -6,7 +6,8 @@ HOST=${HOST:-scotus-vps}
 cd "$(dirname "$0")/.."
 
 ssh "$HOST" 'set -e; cd /opt/hyperion-relay; ts=$(date +%Y%m%d-%H%M%S); mkdir -p backups; tar czf backups/relay-$ts.tgz relay; ls -t backups | tail -n +6 | xargs -r -I{} rm backups/{}'
-scp -q server.py answer.py answer.html "$HOST:/opt/hyperion-relay/relay/"
+scp -q server.py answer.py "$HOST:/opt/hyperion-relay/relay/"
+ssh "$HOST" rm -f /opt/hyperion-relay/relay/answer.html
 scp -q deploy/hyperion-relay.service deploy/hyperion-relay.slice "$HOST:/etc/systemd/system/"
 ssh "$HOST" 'set -e
 systemctl daemon-reload

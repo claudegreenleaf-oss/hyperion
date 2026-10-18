@@ -29,7 +29,7 @@ import zstandard
 from curl_cffi import requests as cffi
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, Response, StreamingResponse
+from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 import answer as ans
@@ -527,20 +527,27 @@ answers = TTLCache(300, 10 * 60)
 
 
 async def _produce(q: str, st: ans.Stream, voice: bool = False):
-    """Fill one answer stream: sources, page texts, the extracted sentence, then the answer."""
+    """Fill one answer stream. Spoken requests are routed first: open a site, answer from the
+    model's knowledge, or search (with a cleaned-up query) and answer from the pages."""
     t0 = time.monotonic()
     sq = q
     if voice:
-        sq = await ans.search_query(q) or q
+        r = await ans.route(q)
+        if r and r["kind"] == "open":
+            await st.put({"type": "open", "url": r["url"], "label": r["label"]})
+            await st.put({"type": "done"}, last=True)
+            return
+        if r and r["kind"] == "answer":
+            await st.put({"type": "answer", "easy": True, "short": r["answer"], "url": "", "host": "",
+                          "by": "knowledge", "model": ans.MODEL})
+            await st.put({"type": "done"}, last=True)
+            return
+        if r and r["kind"] == "search":
+            sq = r["query"]
         await st.put({"type": "query", "q": sq})
-    direct = await ans.direct_answer(q) if ans.is_computation(q) else None
-    if direct:
-        await st.put({"type": "answer", "easy": True, "short": direct, "url": "", "host": "computed",
-                      "by": "model", "model": ans.MODEL})
-        await st.put({"type": "done"}, last=True)
-        return
     try:
-        out = await _run_search(sq, 8, 3, 8000, t0 + 4.5, True, t0)
+        # Two pages are enough for a short spoken answer and arrive sooner than three.
+        out = await _run_search(sq, 8, 2 if voice else 3, 8000, t0 + 4.5, True, t0)
     except SearchError as e:
         await st.put({"type": "error", "error": str(e)}, last=True)
         return
@@ -602,13 +609,6 @@ async def answer(request: Request):
     return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
 
-PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "answer.html")
-
-
-async def answer_page(request: Request):
-    return FileResponse(PAGE, media_type="text/html", headers={"Cache-Control": "max-age=60"})
-
-
 async def healthz(request: Request):
     return _reply(request, {"ok": True, "pages_cached": len(pages.d), "inflight": len(inflight),
                             "answers_cached": len(answers.d), "model": ans.MODEL if ans.LLM else None})
@@ -618,6 +618,5 @@ app = Starlette(routes=[
     Route("/v1/search", search, methods=["POST"]),
     Route("/v1/fetch", fetch, methods=["POST"]),
     Route("/v1/answer", answer, methods=["POST"]),
-    Route("/a", answer_page),
     Route("/healthz", healthz),
 ])

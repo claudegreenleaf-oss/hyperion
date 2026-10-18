@@ -47,7 +47,7 @@ thread_local! {
 }
 
 const LISTEN_W: f64 = 460.0;
-const ANSWER_W: f64 = 560.0;
+const ANSWER_W: f64 = 620.0;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -145,7 +145,7 @@ pub fn init() {
         let _: () = msg_send![&*dot, setAutoresizingMask: 1usize | 4 | 8];
         pulse(dl);
 
-        let title = label(16.0, 0.23, "white", 2);
+        let title = label(16.0, 0.23, "white", 4);
         let sub = label(12.0, 0.0, "gray", 1);
         let _: () = msg_send![&*root, addSubview: &*dot];
         let _: () = msg_send![&*root, addSubview: &*title];
@@ -311,12 +311,13 @@ pub fn thinking(query: &str) {
     });
 }
 
-/// A short answer: grow a little more and show it.
+/// The answer: grow just enough to show it (up to four lines).
 pub fn answer(short: &str, source: &str) {
     with(|n| unsafe {
-        let lines = if short.chars().count() > 50 { 2.0 } else { 1.0 };
+        let lines = ((short.chars().count() as f64) / 62.0).ceil().clamp(1.0, 4.0);
         let target = n.frame_for(ANSWER_W, n.notch_h + 50.0 + 21.0 * lines);
-        n.transition(target, 0.24, short, &format!("{source}  ·  click for the page"), lines, false);
+        let sub = if source.is_empty() { "click for Google results".to_string() } else { format!("{source}  ·  click for Google results") };
+        n.transition(target, 0.24, short, &sub, lines, false);
     });
 }
 

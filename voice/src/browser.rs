@@ -12,54 +12,36 @@ fn osascript(script: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn find_window(origin: &str) -> String {
-    format!(
-        r#"set w to missing value
-    repeat with x in windows
-      try
-        if (URL of active tab of x) starts with "{origin}/a" then
-          set w to x
-          exit repeat
-        end if
-      end try
-    end repeat"#
-    )
-}
-
-/// Bounds of the window an answer would land in, if the browser is already running:
-/// (left, top, right, bottom) in AppleScript screen coordinates.
-pub fn answer_window_bounds(bundle: &str, origin: &str) -> Option<(f64, f64, f64, f64)> {
+/// Bounds of the browser's front window, if it is running: (left, top, right, bottom) in
+/// AppleScript screen coordinates. The notch grows into this rectangle.
+pub fn front_window_bounds(bundle: &str) -> Option<(f64, f64, f64, f64)> {
     let script = format!(
         r#"if application id "{bundle}" is not running then return ""
 tell application id "{bundle}"
     if (count of windows) is 0 then return ""
-    {find}
-    if w is missing value then set w to window 1
-    set b to bounds of w
+    set b to bounds of window 1
     return ((item 1 of b) as text) & "," & ((item 2 of b) as text) & "," & ((item 3 of b) as text) & "," & ((item 4 of b) as text)
-end tell"#,
-        find = find_window(origin)
+end tell"#
     );
     let s = osascript(&script)?;
     let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
     (v.len() == 4).then(|| (v[0], v[1], v[2], v[3]))
 }
 
-/// Show `url` in the answer window (made if needed) and bring it to the front.
-pub fn show(bundle: &str, origin: &str, url: &str) {
-    let url = url.replace('"', "%22");
-    let script = format!(
-        r#"tell application id "{bundle}"
-    {find}
-    if w is missing value then set w to make new window
-    set URL of active tab of w to "{url}"
-    set index of w to 1
-    activate
-end tell"#,
-        find = find_window(origin)
-    );
-    if osascript(&script).is_none() {
-        // Fall back to a plain open, which at least brings the page up front.
-        let _ = Command::new("/usr/bin/open").args(["-b", bundle, &url]).status();
+/// Open `url` in a new tab of the browser and bring it to the front, like clicking a link.
+pub fn show(bundle: &str, url: &str) {
+    let _ = Command::new("/usr/bin/open").args(["-b", bundle, url]).status();
+}
+
+/// Google results for a query, as the browser itself would show them.
+pub fn google(q: &str) -> String {
+    let mut out = String::from("https://www.google.com/search?q=");
+    for b in q.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
     }
+    out
 }

@@ -36,6 +36,7 @@ struct Ctl {
     last_prefetch: Instant,
     bounds: Option<(f64, f64, f64, f64)>,
     passage: Option<(String, String)>,
+    search_q: String,
     decided: bool,
 }
 
@@ -51,6 +52,7 @@ thread_local! {
         last_prefetch: Instant::now(),
         bounds: None,
         passage: None,
+        search_q: String::new(),
         decided: false,
     });
 }
@@ -111,6 +113,7 @@ pub fn on_wake() {
         c.query.clear();
         c.prefetched.clear();
         c.passage = None;
+        c.search_q.clear();
         c.bounds = None;
         c.decided = false;
         c.woke_at = Instant::now();
@@ -223,9 +226,9 @@ fn ask(gen: u64) {
     notch::thinking(&q);
     relay::ask(q, on_relay, gen);
     let cfg = config::get();
-    let (bundle, origin) = (cfg.browser_bundle.clone(), cfg.relay.clone());
+    let bundle = cfg.browser_bundle.clone();
     std::thread::spawn(move || {
-        let b = browser::answer_window_bounds(&bundle, &origin);
+        let b = browser::front_window_bounds(&bundle);
         crate::objc::main_async(move || with(|c| if c.gen == gen { c.bounds = b }));
     });
     main_after(cfg.answer_budget_ms, move || decide_timeout(gen));
@@ -239,12 +242,17 @@ fn on_relay(gen: u64, ev: Value) {
     let s = |k: &str| ev.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     match ty {
         "passage" => with(|c| c.passage = Some((s("text"), s("host")))),
+        "query" => with(|c| c.search_q = s("q")),
+        "open" => {
+            log(format!("ctl: open {} ({})", s("url"), s("label")));
+            open_url(gen, s("url"));
+        }
         "answer" => {
             let easy = ev.get("easy").and_then(Value::as_bool).unwrap_or(false);
             let short = s("short");
             let ms = with(|c| c.asked_at.elapsed().as_millis());
             log(format!("ctl: answer easy={easy} by={} in {ms} ms: {short:?}", s("by")));
-            if easy && !short.is_empty() && short.chars().count() <= 140 {
+            if easy && !short.is_empty() && short.chars().count() <= 260 {
                 show_answer(gen, &short, &s("host"));
             } else {
                 to_browser(gen);
@@ -277,17 +285,22 @@ fn show_answer(gen: u64, short: &str, host: &str) {
     });
 }
 
+/// The notch can't hold this one: Google results for the (cleaned-up) query.
 fn to_browser(gen: u64) {
-    let (q, bounds) = with(|c| {
+    let q = with(|c| if c.search_q.is_empty() { c.query.clone() } else { c.search_q.clone() });
+    open_url(gen, browser::google(&q));
+}
+
+/// Grow the notch into the browser window and open `url` there.
+fn open_url(gen: u64, url: String) {
+    let bounds = with(|c| {
         c.decided = true;
         set_phase(c, Phase::Thinking);
-        (c.query.clone(), c.bounds)
+        c.bounds
     });
-    let cfg = config::get();
-    let url = format!("{}/a?q={}", cfg.relay, encode(&q));
-    let (bundle, origin) = (cfg.browser_bundle.clone(), cfg.relay.clone());
+    let bundle = config::get().browser_bundle.clone();
     notch::handoff(bounds, move || {
-        std::thread::spawn(move || browser::show(&bundle, &origin, &url));
+        std::thread::spawn(move || browser::show(&bundle, &url));
     });
     main_after(700, move || reset(gen));
 }
@@ -320,16 +333,4 @@ fn reset(gen: u64) {
             }
         });
     }
-}
-
-fn encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

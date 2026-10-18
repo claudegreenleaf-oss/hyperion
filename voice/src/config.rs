@@ -45,7 +45,7 @@ fn load() -> Config {
         browser_bundle: s("browser_bundle", "net.imput.helium"),
         threshold: n("threshold", 0.5) as f32,
         silence_ms: n("silence_ms", 650.0) as u64,
-        answer_budget_ms: n("answer_budget_ms", 2600.0) as u64,
+        answer_budget_ms: n("answer_budget_ms", 3200.0) as u64,
         wake_model: s("wake_model", "hey_jarvis_v0.1.onnx"),
         vocabulary: v
             .get("vocabulary")
