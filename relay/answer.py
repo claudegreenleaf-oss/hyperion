@@ -143,7 +143,8 @@ def heuristic_easy(q: str, best: dict | None) -> bool:
 _llm = httpx.AsyncClient(http2=True, timeout=httpx.Timeout(5.0, connect=1.0)) if LLM else None
 REPLY_REF = re.compile(r"\s*\[(\d)\]\s*\.?\s*$")
 SYSTEM = ("You answer spoken questions for an answer panel, using the numbered web excerpts you are given. "
-          "Reply with only the answer, as short as possible, no preamble. A single fact: one line. A list (essay "
+          "Reply with only the answer, as short as possible, no preamble. A single fact: one line, with the few words "
+          "that answer it in **double asterisks**. A list (essay "
           "prompts, steps, options): one item per line, at most 8 items, at most 90 words in all. End with the number "
           "of the excerpt it came from in brackets, like [2]. Reply exactly NEEDS_PAGE only when the excerpts contain "
           "nothing that answers the question.")
@@ -151,10 +152,12 @@ SYSTEM = ("You answer spoken questions for an answer panel, using the numbered w
 
 PAGE_SYSTEM = ("You answer spoken questions for a small answer panel on a Mac, from the numbered web pages you are "
                "given. The question came from speech recognition, so read it for what was meant. Reply with only the "
-               "answer, as short as possible, no preamble: a single fact in one line; a list (essay prompts, steps, "
-               "options) one item per line, at most 8 items and 90 words. Prefer the most recent, most official source. "
-               "End with the number of the page it came from in brackets, like [2]. Reply exactly NEEDS_PAGE only if "
-               "the pages do not answer it.")
+               "answer, as short as possible, no preamble: a single fact in one line, with the few words that answer "
+               "it (a name, number, date or place) in **double asterisks**; a list (essay prompts, steps, options) one "
+               "item per line, at most 8 items and 90 words. Prefer the most recent, most official source. End with "
+               "the number of the page it came from in brackets, like [2]. Never describe the pages or say what they "
+               "lack: if they do not answer it, answer from what you know for certain, with no number. Reply exactly "
+               "NEEDS_PAGE only if you cannot answer it.")
 
 
 async def model_answer(q: str, excerpts: list[dict], pages: list[dict] | None = None) -> dict | None:
@@ -179,11 +182,12 @@ async def model_answer(q: str, excerpts: list[dict], pages: list[dict] | None = 
     if not reply or "NEEDS_PAGE" in reply:
         return {"easy": False, "ms": ms} if reply else None
     m = REPLY_REF.search(reply)
-    ref = int(m.group(1)) - 1 if m else 0
+    ref = int(m.group(1)) - 1 if m else -1
     short = REPLY_REF.sub("", reply).strip().strip('"').strip()
     if not short or len(short) > 900:
         return {"easy": False, "ms": ms}
-    ref = ref if 0 <= ref < len(refs) else 0
+    if not 0 <= ref < len(refs):  # answered from what the model knows, not from a page
+        return {"easy": True, "short": short, "ref": None, "url": "", "host": "", "passage": "", "ms": ms}
     return {"easy": True, "short": short, "ref": ref, "url": refs[ref]["url"], "host": refs[ref]["host"],
             "passage": refs[ref].get("text", ""), "ms": ms}
 
@@ -226,7 +230,7 @@ async def _local_chat(system: str, user: str, max_tokens: int, budget: float) ->
 ROUTE = """Route a request spoken to a Mac voice assistant. Reply with one JSON object only.
 {{"kind":"command","id":"c3","args":{{"arg":"value"}},"done":"at most 4 words"}} if one of COMMANDS does it. Use its argument names; times like 2026-10-19T09:00; for on, off or a level use a set command with a value, not a toggle.
 {{"kind":"open","url":"https://...","label":"Site"}} to go to a website. Installed apps are commands.
-{{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions, spelling, the current time or date (from Now), or questions about you: you are Thomas's voice assistant, built into his browser, Hyperion (60 words max).
+{{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions, spelling, the current time or date (from Now), or questions about you: you are Thomas's voice assistant, built into his browser, Hyperion (60 words max, with the words that answer it in **double asterisks**).
 {{"kind":"search","query":"..."}} for any other question: a short web query, fixing misheard words ("REI" or "RAE" is REA, "supplements" is supplemental essays).
 COMMANDS:
 {commands}"""

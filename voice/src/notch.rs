@@ -36,6 +36,17 @@ unsafe impl Encode for EdgeInsets {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct Range {
+    location: usize,
+    length: usize,
+}
+
+unsafe impl Encode for Range {
+    const ENCODING: Encoding = Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Transform3D([f64; 16]);
 
 const D: Encoding = f64::ENCODING;
@@ -97,6 +108,11 @@ struct Notch {
     icon: Retained<AnyObject>,
     title: Retained<AnyObject>,
     ear: Retained<AnyObject>,
+    hero: Retained<AnyObject>,
+    mark: Retained<AnyObject>,
+    mark_fill: *mut AnyObject,
+    glint: *mut AnyObject,
+    body: Retained<AnyObject>,
     pills: Vec<(Retained<AnyObject>, Retained<AnyObject>)>,
     row_urls: Vec<String>,
     row_rects: Vec<NSRect>,
@@ -122,7 +138,20 @@ unsafe fn white(alpha: f64) -> *mut AnyObject {
 }
 
 unsafe fn rgb(r: f64, g: f64, b: f64) -> *mut AnyObject {
-    msg_send![class!(NSColor), colorWithSRGBRed: r, green: g, blue: b, alpha: 1.0f64]
+    rgba(r, g, b, 1.0)
+}
+
+unsafe fn rgba(r: f64, g: f64, b: f64, a: f64) -> *mut AnyObject {
+    msg_send![class!(NSColor), colorWithSRGBRed: r, green: g, blue: b, alpha: a]
+}
+
+unsafe fn font(size: f64, weight: f64) -> *mut AnyObject {
+    msg_send![class!(NSFont), systemFontOfSize: size, weight: weight]
+}
+
+unsafe fn cg_array(colors: &[*mut AnyObject]) -> *mut AnyObject {
+    let refs: Vec<*const c_void> = colors.iter().map(|c| cg(*c)).collect();
+    msg_send![class!(NSArray), arrayWithObjects: refs.as_ptr() as *const *mut AnyObject, count: refs.len()]
 }
 
 unsafe fn cg(color: *mut AnyObject) -> *const c_void {
@@ -140,8 +169,7 @@ unsafe fn label(size: f64, weight: f64, alpha: f64, wrap: bool) -> Retained<AnyO
     } else {
         msg_send![class!(NSTextField), labelWithString: &*empty]
     };
-    let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: size, weight: weight];
-    let _: () = msg_send![&*l, setFont: font];
+    let _: () = msg_send![&*l, setFont: font(size, weight)];
     let _: () = msg_send![&*l, setTextColor: white(alpha)];
     let _: () = msg_send![&*l, setDrawsBackground: false];
     let _: () = msg_send![&*l, setSelectable: false];
@@ -326,6 +354,33 @@ pub fn init() {
         let _: () = msg_send![&*content, addSubview: &*title];
         let _: () = msg_send![&*content, addSubview: &*ear];
 
+        // The answer's headline sits on a highlight: a capsule in the waveform's colours, deep
+        // over the black, with a glint that crosses it once.
+        let mark = layer_view(rect(0.0, 0.0, 10.0, 10.0));
+        let ml: *mut AnyObject = msg_send![&*mark, layer];
+        let mark_fill: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let hues: Vec<*mut AnyObject> = WAVE[..3].iter().map(|(r, g, b)| rgba(*r, *g, *b, 0.5)).collect();
+        let _: () = msg_send![mark_fill, setColors: cg_array(&hues)];
+        let _: () = msg_send![mark_fill, setStartPoint: NSPoint::new(0.0, 0.5)];
+        let _: () = msg_send![mark_fill, setEndPoint: NSPoint::new(1.0, 0.5)];
+        let _: () = msg_send![mark_fill, setAnchorPoint: NSPoint::new(0.0, 0.5)];
+        let _: () = msg_send![mark_fill, setMasksToBounds: true];
+        let _: () = msg_send![mark_fill, setBorderWidth: 0.5f64];
+        let _: () = msg_send![mark_fill, setBorderColor: cg(white(0.16))];
+        let glint: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let _: () = msg_send![glint, setColors: cg_array(&[white(0.0), white(0.28), white(0.0)])];
+        let _: () = msg_send![glint, setStartPoint: NSPoint::new(0.0, 0.5)];
+        let _: () = msg_send![glint, setEndPoint: NSPoint::new(1.0, 0.5)];
+        let _: () = msg_send![mark_fill, addSublayer: glint];
+        let _: () = msg_send![ml, addSublayer: mark_fill];
+        let _: () = msg_send![&*content, addSubview: &*mark];
+        let hero = label(24.0, 0.3, 1.0, false);
+        let _: () = msg_send![&*hero, setWantsLayer: true];
+        let _: () = msg_send![&*content, addSubview: &*hero];
+        let body = label(15.0, 0.0, 0.94, true);
+        let _: () = msg_send![&*body, setMaximumNumberOfLines: 16isize];
+        let _: () = msg_send![&*content, addSubview: &*body];
+
         let mut pills = Vec::new();
         for _ in 0..3 {
             let p = layer_view(rect(0.0, 0.0, 10.0, 10.0));
@@ -359,7 +414,7 @@ pub fn init() {
         set_path_now(&shape, path(WIN_W / 2.0, 0.0, collapsed));
         N.with(|n| {
             *n.borrow_mut() = Some(Notch {
-                panel, root, holder, shape, content, bars, bar_layers, icon, title, ear, pills,
+                panel, root, holder, shape, content, bars, bar_layers, icon, title, ear, hero, mark, mark_fill, glint, body, pills,
                 row_urls: Vec::new(),
                 row_rects: Vec::new(),
                 screen: frame,
@@ -431,7 +486,7 @@ impl Notch {
 
     /// Hide every content element; each state then shows only what it uses.
     unsafe fn clear(&mut self) {
-        for v in [&self.bars, &self.icon, &self.title, &self.ear] {
+        for v in [&self.bars, &self.icon, &self.title, &self.ear, &self.hero, &self.mark, &self.body] {
             let _: () = msg_send![&**v, setHidden: true];
         }
         for (p, _) in &self.pills {
@@ -491,19 +546,112 @@ unsafe fn settle_in(view: &AnyObject) {
 /// A playful pop for an icon (the check after a command): it springs up from small, past full
 /// size, and settles.
 unsafe fn pop(view: &AnyObject) {
+    pop_from(view, 0.3, 0.55, 0.0);
+}
+
+/// Spring `view` up from `scale` about its centre, starting `delay` seconds from now (it holds
+/// the small size until then).
+unsafe fn pop_from(view: &AnyObject, scale: f64, bounce: f64, delay: f64) {
     let layer: *mut AnyObject = msg_send![view, layer];
     if layer.is_null() {
         return;
     }
     let b: NSRect = msg_send![layer, bounds];
-    let from = Transform3D::scale_about(0.3, b.size.width / 2.0, b.size.height / 2.0);
+    let from = Transform3D::scale_about(scale, b.size.width / 2.0, b.size.height / 2.0);
     let to = Transform3D::scale_about(1.0, 0.0, 0.0);
     let fv: *mut AnyObject = msg_send![class!(NSValue), valueWithCATransform3D: from];
     let tv: *mut AnyObject = msg_send![class!(NSValue), valueWithCATransform3D: to];
-    let anim = spring("transform", 0.5, 0.55);
+    let anim = spring("transform", 0.5, bounce);
     let _: () = msg_send![&*anim, setFromValue: fv];
     let _: () = msg_send![&*anim, setToValue: tv];
+    later(&anim, delay);
     let _: () = msg_send![layer, addAnimation: &*anim, forKey: &*ns("pop")];
+}
+
+/// Start an animation `delay` seconds from now, showing its first frame until then.
+unsafe fn later(anim: &AnyObject, delay: f64) {
+    if delay > 0.0 {
+        let _: () = msg_send![anim, setBeginTime: CACurrentMediaTime() + delay];
+        let _: () = msg_send![anim, setFillMode: &*ns("backwards")];
+    }
+}
+
+/// The highlight behind the headline: the capsule stretches out from a dot at the left, past its
+/// width and back, then a glint runs across it once.
+unsafe fn sweep(fill: *mut AnyObject, glint: *mut AnyObject, w: f64, h: f64, delay: f64) {
+    let anim = spring("bounds.size.width", 0.55, 0.38);
+    let _: () = msg_send![&*anim, setFromValue: &*number(h)];
+    let _: () = msg_send![&*anim, setToValue: &*number(w)];
+    later(&anim, delay);
+    let _: () = msg_send![fill, addAnimation: &*anim, forKey: &*ns("sweep")];
+    let run: *mut AnyObject = msg_send![class!(CABasicAnimation), animationWithKeyPath: &*ns("position.x")];
+    let _: () = msg_send![run, setFromValue: &*number(-40.0)];
+    let _: () = msg_send![run, setToValue: &*number(w + 40.0)];
+    let _: () = msg_send![run, setDuration: 0.9f64];
+    let ease: *mut AnyObject = msg_send![class!(CAMediaTimingFunction), functionWithName: &*ns("easeInEaseOut")];
+    let _: () = msg_send![run, setTimingFunction: ease];
+    let _: () = msg_send![run, setBeginTime: CACurrentMediaTime() + delay + 0.45];
+    let _: () = msg_send![glint, addAnimation: run, forKey: &*ns("glint")];
+}
+
+/// The answer's **marked** words (the relay marks what answers the question): the plain text,
+/// each marked span as a UTF-16 range, and the marked words themselves.
+fn marked(text: &str) -> (String, Vec<(usize, usize)>, Vec<String>) {
+    let parts: Vec<&str> = text.split("**").collect();
+    // An odd number of parts means every ** has its pair.
+    let paired = parts.len() % 2 == 1;
+    let (mut plain, mut spans, mut keys, mut at) = (String::new(), Vec::new(), Vec::new(), 0);
+    for (i, part) in parts.iter().enumerate() {
+        let n = part.encode_utf16().count();
+        if paired && i % 2 == 1 && n > 0 {
+            spans.push((at, n));
+            keys.push(part.to_string());
+        }
+        plain.push_str(part);
+        at += n;
+    }
+    (plain, spans, keys)
+}
+
+/// Lowercase letters and digits only, to tell whether two phrasings say the same thing.
+fn squash(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// `text` at `size` in white at `alpha`, with each span at `weight` and `span_alpha`.
+unsafe fn styled(text: &str, spans: &[(usize, usize)], size: f64, alpha: f64, weight: f64, span_alpha: f64) -> Retained<AnyObject> {
+    let a: Allocated<AnyObject> = msg_send![class!(NSMutableAttributedString), alloc];
+    let s: Retained<AnyObject> = msg_send![a, initWithString: &*ns(text)];
+    let para: Retained<AnyObject> = msg_send![class!(NSMutableParagraphStyle), new];
+    let _: () = msg_send![&*para, setLineSpacing: 2.0f64];
+    let (f, c) = (ns("NSFont"), ns("NSColor"));
+    let all = Range { location: 0, length: text.encode_utf16().count() };
+    let _: () = msg_send![&*s, addAttribute: &*ns("NSParagraphStyle"), value: &*para, range: all];
+    let _: () = msg_send![&*s, addAttribute: &*f, value: font(size, 0.0), range: all];
+    let _: () = msg_send![&*s, addAttribute: &*c, value: white(alpha), range: all];
+    for &(location, length) in spans {
+        let r = Range { location, length };
+        let _: () = msg_send![&*s, addAttribute: &*f, value: font(size, weight), range: r];
+        let _: () = msg_send![&*s, addAttribute: &*c, value: white(span_alpha), range: r];
+    }
+    s
+}
+
+/// The headline's size at the larger of two type sizes it fits at, if either.
+unsafe fn hero_fit(hero: &AnyObject, key: &str, max_w: f64) -> Option<NSSize> {
+    if key.is_empty() {
+        return None;
+    }
+    let _: () = msg_send![hero, setStringValue: &*ns(key)];
+    for size in [24.0, 20.0] {
+        let _: () = msg_send![hero, setFont: font(size, 0.3)];
+        let cell: *mut AnyObject = msg_send![hero, cell];
+        let s: NSSize = msg_send![cell, cellSizeForBounds: rect(0.0, 0.0, 4000.0, 200.0)];
+        if s.width <= max_w {
+            return Some(NSSize::new(s.width.ceil(), s.height.ceil()));
+        }
+    }
+    None
 }
 
 fn with<R>(f: impl FnOnce(&mut Notch) -> R) -> Option<R> {
@@ -585,21 +733,16 @@ pub fn done(text: &str) {
     });
 }
 
-/// The answer: the source in the ear beside the camera, the answer below, then up to three
-/// sources as pills to click.
+/// The answer: the source in the ear beside the camera; the words that answer the question as
+/// a headline on a highlight that springs in (when the relay marked one short phrase), the rest
+/// below with the marked words brighter; then up to three sources as pills to click.
 pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
     with(|n| unsafe {
         n.clear();
         let w = 590.0;
         let inner = w - 2.0 * PAD;
         let left = (WIN_W - w) / 2.0 + PAD;
-        // Measure the answer at the width it will wrap to.
-        let _: () = msg_send![&*n.title, setMaximumNumberOfLines: 14isize];
-        let _: () = msg_send![&*n.title, setLineBreakMode: 0usize];
-        let _: () = msg_send![&*n.title, setStringValue: &*ns(text)];
-        let cell: *mut AnyObject = msg_send![&*n.title, cell];
-        let size: NSSize = msg_send![cell, cellSizeForBounds: rect(0.0, 0.0, inner, 2000.0)];
-        let text_h = size.height.ceil().clamp(20.0, 300.0);
+        let (plain, spans, keys) = marked(text);
 
         let ear_w = (w - n.notch_w) / 2.0 - PAD - 10.0;
         if !source.is_empty() && ear_w > 40.0 {
@@ -607,11 +750,50 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
             let _: () = msg_send![&*n.ear, setFrame: rect(left + 2.0, n.y((n.notch_h - 15.0) / 2.0 + 1.0, 15.0), ear_w, 15.0)];
             let _: () = msg_send![&*n.ear, setHidden: false];
         }
-        let top = n.notch_h + 12.0;
-        let _: () = msg_send![&*n.title, setFrame: rect(left, n.y(top, text_h), inner, text_h)];
-        let _: () = msg_send![&*n.title, setHidden: false];
 
-        let mut y = top + text_h + 16.0;
+        let mut top = n.notch_h + 12.0;
+        let hero = if spans.len() == 1 && !plain.contains('\n') { hero_fit(&n.hero, keys[0].trim(), inner - 32.0) } else { None };
+        let mut capsule = (0.0, 0.0);
+        if let Some(size) = hero {
+            let (cw, ch) = (size.width + 30.0, (size.height + 10.0).round());
+            capsule = (cw, ch);
+            let _: () = msg_send![&*n.mark, setFrame: rect(left, n.y(top, ch), cw, ch)];
+            let _: () = msg_send![class!(CATransaction), begin];
+            let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+            let _: () = msg_send![n.mark_fill, setBounds: rect(0.0, 0.0, cw, ch)];
+            let _: () = msg_send![n.mark_fill, setPosition: NSPoint::new(0.0, ch / 2.0)];
+            let _: () = msg_send![n.mark_fill, setCornerRadius: ch / 2.0];
+            let _: () = msg_send![n.glint, setBounds: rect(0.0, 0.0, 56.0, ch)];
+            let _: () = msg_send![n.glint, setPosition: NSPoint::new(-40.0, ch / 2.0)];
+            let _: () = msg_send![class!(CATransaction), commit];
+            let _: () = msg_send![&*n.hero, setFrame: rect(left + 15.0, n.y(top + (ch - size.height) / 2.0, size.height), size.width, size.height)];
+            let _: () = msg_send![&*n.mark, setHidden: false];
+            let _: () = msg_send![&*n.hero, setHidden: false];
+            top += ch;
+        }
+
+        // The rest of the answer, left out when the headline already says all of it.
+        if hero.is_none() || squash(&plain) != squash(&keys[0]) {
+            let st = if hero.is_some() {
+                styled(&plain, &spans, 14.0, 0.6, 0.23, 0.92)
+            } else if spans.is_empty() {
+                styled(&plain, &spans, 15.0, 0.94, 0.0, 0.94)
+            } else {
+                styled(&plain, &spans, 15.0, 0.78, 0.3, 1.0)
+            };
+            let _: () = msg_send![&*n.body, setAttributedStringValue: &*st];
+            let cell: *mut AnyObject = msg_send![&*n.body, cell];
+            let size: NSSize = msg_send![cell, cellSizeForBounds: rect(0.0, 0.0, inner, 2000.0)];
+            let text_h = size.height.ceil().clamp(20.0, 300.0);
+            if hero.is_some() {
+                top += 10.0;
+            }
+            let _: () = msg_send![&*n.body, setFrame: rect(left, n.y(top, text_h), inner, text_h)];
+            let _: () = msg_send![&*n.body, setHidden: false];
+            top += text_h;
+        }
+
+        let mut y = top + 16.0;
         for (i, (label, url)) in rows.iter().take(3).enumerate() {
             let (p, t) = &n.pills[i];
             let fr = rect(left, n.y(y, 30.0), inner, 30.0);
@@ -626,6 +808,12 @@ pub fn answer(text: &str, source: &str, rows: &[(String, String)]) {
         let h = if rows.is_empty() { y - 16.0 + 20.0 } else { y - 6.0 + 14.0 };
         // Room is left below for the spring's overshoot.
         n.morph(Shape { w, h: h.min(WIN_H - 36.0), top_r: 14.0, bot_r: 30.0 }, 0.26);
+        if hero.is_some() {
+            // The headline pops in as the content arrives, and the highlight sweeps in behind it
+            // a beat later, as if someone just marked it.
+            pop_from(&n.hero, 0.55, 0.5, 0.14);
+            sweep(n.mark_fill, n.glint, capsule.0, capsule.1, 0.2);
+        }
     });
 }
 

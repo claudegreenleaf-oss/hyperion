@@ -526,6 +526,12 @@ async def fetch(request: Request):
 answers = TTLCache(300, 10 * 60)
 
 
+def _marks(short: str, voice: bool) -> str:
+    """Answers mark the words that answer the question in **asterisks**; the notch draws them as a
+    highlight, and anything else gets plain text."""
+    return short if voice else short.replace("**", "")
+
+
 async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = "", now: str = ""):
     """Fill one answer stream. Spoken requests are routed first: open a site, answer from the
     model's knowledge, or search (with a cleaned-up query) and answer from the pages."""
@@ -548,7 +554,7 @@ async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = 
             await st.put({"type": "done"}, last=True)
             return
         if r and r["kind"] == "answer":
-            await st.put({"type": "answer", "easy": True, "short": r["answer"], "url": "", "host": "",
+            await st.put({"type": "answer", "easy": True, "short": _marks(r["answer"], voice), "url": "", "host": "",
                           "by": "knowledge", "model": ans.MODEL})
             await st.put({"type": "done"}, last=True)
             return
@@ -583,7 +589,7 @@ async def _produce(q: str, st: ans.Stream, voice: bool = False, commands: str = 
     excerpts = [{"text": c["text"], "host": ans.host_of(got[c["i"]]["url"]), "url": got[c["i"]]["url"]} for c in picks[:5]]
     m = await ans.model_answer(sq, excerpts, got)
     if m and m.get("easy"):
-        ev = {"type": "answer", "easy": True, "short": m["short"], "url": m["url"], "host": m["host"],
+        ev = {"type": "answer", "easy": True, "short": _marks(m["short"], voice), "url": m["url"], "host": m["host"],
               "passage": m["passage"], "by": "model", "model": ans.CLAUDE_MODEL if ans._claude else ans.MODEL,
               "model_ms": m["ms"]}
     elif best:
