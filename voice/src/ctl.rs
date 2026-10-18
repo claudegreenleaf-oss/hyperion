@@ -78,12 +78,12 @@ fn set_phase(c: &mut Ctl, p: Phase) {
     );
 }
 
-/// Strip the wake word the pre-roll caught ("hey jarvis, when is ..." -> "when is ...").
+/// Strip the wake word the pre-roll caught ("hey google, when is ..." -> "when is ...").
 fn strip_wake(t: &str) -> String {
     let mut s = t.trim().to_string();
     loop {
         let lower = s.to_lowercase();
-        let Some(w) = ["hey jarvis", "hi jarvis", "a jarvis", "jarvis", "hey", "hi"].iter().find(|w| {
+        let Some(w) = ["hey google", "ok google", "okay google", "hi google", "hey jarvis", "hi jarvis", "a jarvis", "jarvis", "hey", "hi"].iter().find(|w| {
             lower.starts_with(*w) && !lower[w.len()..].starts_with(|ch: char| ch.is_alphanumeric())
         }) else {
             break;

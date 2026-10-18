@@ -1,4 +1,4 @@
-//! Hyperion Voice: say "Hey Jarvis" and a question from any app. A short answer appears in the
+//! Hyperion Voice: say "Hey Google" (or "Hey Jarvis") and a question from any app. A short answer appears in the
 //! notch; anything longer animates out of the notch into the browser, which comes to the front.
 //!
 //! Lives in the menu-bar-less accessory layer: no Dock icon, no window until it hears you.
