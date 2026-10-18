@@ -1,0 +1,44 @@
+name: Hyperion Voice
+on:
+  push:
+    paths: ["voice/**", ".github/workflows/voice.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            voice/target
+          key: voice-${{ runner.os }}-${{ hashFiles('voice/Cargo.toml', 'voice/Cargo.lock') }}
+          restore-keys: voice-${{ runner.os }}-
+      - name: Wake word models (openWakeWord v0.5.1)
+        working-directory: voice
+        run: |
+          mkdir -p models
+          for m in melspectrogram embedding_model hey_jarvis_v0.1; do
+            curl -fsSL --retry 3 -o "models/$m.onnx" "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/$m.onnx"
+          done
+          ls -la models
+      - name: Build
+        working-directory: voice
+        run: cargo build --release --locked || cargo build --release
+      - name: Bundle and sign
+        env:
+          SIGN_P12: ${{ secrets.VOICE_SIGN_P12 }}
+          SIGN_P12_PASSWORD: ${{ secrets.VOICE_SIGN_P12_PASSWORD }}
+        run: voice/bundle/make-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyperion-voice
+          path: |
+            voice/dist/Hyperion-Voice.zip
+            voice/Cargo.lock

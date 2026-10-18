@@ -29,8 +29,10 @@ import zstandard
 from curl_cffi import requests as cffi
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import FileResponse, Response, StreamingResponse
 from starlette.routing import Route
+
+import answer as ans
 
 SEARXNG = os.environ.get("RELAY_SEARXNG", "http://127.0.0.1:8855")
 # Another relay on a different (residential) IP that takes pages this one is blocked from.
@@ -404,7 +406,27 @@ def _clip(rec, max_chars):
     return r
 
 
+class SearchError(Exception):
+    pass
+
+
 async def search(request: Request):
+    t0 = time.monotonic()
+    d = await request.json()
+    q = str(d.get("q", "")).strip()
+    if not q:
+        return _reply(request, {"error": "missing q"}, 400)
+    try:
+        out = await _run_search(q, _int(d, "n", 8, 1, 20), _int(d, "fetch", 3, 0, 8),
+                                _int(d, "max_chars", 6000, 200, 100000),
+                                t0 + _int(d, "deadline_ms", 5000, 500, 30000) / 1000,
+                                d.get("cache", True) is not False, t0)
+    except SearchError as e:
+        return _reply(request, {"error": str(e)}, 502)
+    return _reply(request, out)
+
+
+async def _run_search(q, n, fetch, max_chars, deadline, use_cache, t0):
     """Search, then read `fetch` result pages, optimized for time to a useful answer.
 
     Pages are read from the top fetch+2 results, starting the moment Yahoo answers, and the
@@ -413,18 +435,7 @@ async def search(request: Request):
     loading Bing's top results while Yahoo works was measured and dropped: only 4 of 60 of
     them ended up in the final top 3, so it mostly took extraction slots from real pages.)
     """
-    t0 = time.monotonic()
-    d = await request.json()
-    q = str(d.get("q", "")).strip()
-    if not q:
-        return _reply(request, {"error": "missing q"}, 400)
-    n = _int(d, "n", 8, 1, 20)
-    fetch = _int(d, "fetch", 3, 0, 8)
-    max_chars = _int(d, "max_chars", 6000, 200, 100000)
-    deadline = t0 + _int(d, "deadline_ms", 5000, 500, 30000) / 1000
-    # "cache": false measures a cold search (used by the benchmark).
-    use_cache = d.get("cache", True) is not False
-
+    # use_cache False measures a cold search (used by the benchmark).
     tasks: dict[str, asyncio.Task] = {}
 
     def start(url):
@@ -462,7 +473,7 @@ async def search(request: Request):
             t.cancel()
         if not results:
             msg = f"{type(err).__name__}: {err}" if err else "no results"
-            return _reply(request, {"error": f"search failed: {msg}"[:300]}, 502)
+            raise SearchError(f"search failed: {msg}"[:300])
         searches.put((q, n), results)
     t_search = time.monotonic()
 
@@ -494,13 +505,13 @@ async def search(request: Request):
                 rec = t.result() if t.done() and not t.exception() else {
                     "url": u, "error": "still loading at deadline; fetch again shortly"}
                 chosen.append(_clip(rec, max_chars))
-    return _reply(request, {
+    return {
         "query": q,
         "results": results,
         "pages": chosen,
         "timing": {"search_ms": round((t_search - t0) * 1000), "total_ms": round((time.monotonic() - t0) * 1000),
                    "search_cached": search_cached, "engine": engine},
-    })
+    }
 
 
 async def fetch(request: Request):
@@ -515,12 +526,91 @@ async def fetch(request: Request):
     return _reply(request, {"pages": got, "timing": {"total_ms": round((time.monotonic() - t0) * 1000)}})
 
 
+answers = TTLCache(300, 10 * 60)
+
+
+async def _produce(q: str, st: ans.Stream):
+    """Fill one answer stream: sources, page texts, the extracted sentence, then the answer."""
+    t0 = time.monotonic()
+    try:
+        out = await _run_search(q, 8, 3, 8000, t0 + 4.0, True, t0)
+    except SearchError as e:
+        await st.put({"type": "error", "error": str(e)}, last=True)
+        return
+    results = [{"title": r.get("title", ""), "url": r["url"], "host": ans.host_of(r["url"]),
+                "snippet": r.get("content") or r.get("snippet") or "", "official": ans.is_official(r["url"])}
+               for r in out["results"]]
+    await st.put({"type": "sources", "results": results, "timing": out["timing"]})
+    got = [p for p in out["pages"] if p.get("text")]
+    await st.put({"type": "pages", "pages": [
+        {"url": p["url"], "final_url": p.get("final_url", p["url"]), "title": p.get("title", ""),
+         "host": ans.host_of(p.get("final_url", p["url"])), "text": p["text"]} for p in got]})
+    picks = ans.best_sentences(q, got)
+    best = picks[0] if picks else None
+    if best:
+        page = got[best["i"]]
+        await st.put({"type": "passage", "text": best["text"], "score": best["score"], "url": page["url"],
+                      "host": ans.host_of(page.get("final_url", page["url"])), "title": page.get("title", "")})
+    excerpts = [{"text": c["text"], "host": ans.host_of(got[c["i"]]["url"]), "url": got[c["i"]]["url"]} for c in picks[:3]]
+    m = await ans.model_answer(q, excerpts)
+    if m and m.get("easy"):
+        src = excerpts[m["ref"]]
+        ev = {"type": "answer", "easy": True, "short": m["short"], "url": src["url"], "host": src["host"],
+              "by": "model", "model": ans.MODEL, "model_ms": m["ms"]}
+    elif best:
+        easy = ans.heuristic_easy(q, best) and m is None
+        ev = {"type": "answer", "easy": easy, "short": best["text"], "url": excerpts[0]["url"],
+              "host": excerpts[0]["host"], "by": "extract", "model_ms": m["ms"] if m else None}
+    else:
+        ev = {"type": "answer", "easy": False, "short": "", "url": results[0]["url"] if results else "",
+              "host": results[0]["host"] if results else "", "by": "none"}
+    await st.put(ev)
+    await st.put({"type": "done"}, last=True)
+
+
+async def answer(request: Request):
+    """POST {q, texts?, prefetch?} -> NDJSON events: sources, pages (only with texts), passage,
+    answer, done. Requests for the same query share one stream, and finished ones replay
+    from cache, so the listener's speculative request warms the final one."""
+    d = await request.json()
+    q = re.sub(r"\s+", " ", str(d.get("q", ""))).strip()[:300]
+    if not q:
+        return _reply(request, {"error": "missing q"}, 400)
+    key = q.lower().rstrip("?. ")
+    st = answers.get(key)
+    if st is None:
+        st = ans.Stream()
+        answers.put(key, st)
+        asyncio.get_running_loop().create_task(_produce(q, st))
+    if d.get("prefetch"):
+        return Response(status_code=204)
+    texts = bool(d.get("texts"))
+
+    async def lines():
+        async for ev in st.follow():
+            if ev["type"] == "pages" and not texts:
+                continue
+            yield json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+
+
+PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "answer.html")
+
+
+async def answer_page(request: Request):
+    return FileResponse(PAGE, media_type="text/html", headers={"Cache-Control": "max-age=60"})
+
+
 async def healthz(request: Request):
-    return _reply(request, {"ok": True, "pages_cached": len(pages.d), "inflight": len(inflight)})
+    return _reply(request, {"ok": True, "pages_cached": len(pages.d), "inflight": len(inflight),
+                            "answers_cached": len(answers.d), "model": ans.MODEL if ans.OPENCODE else None})
 
 
 app = Starlette(routes=[
     Route("/v1/search", search, methods=["POST"]),
     Route("/v1/fetch", fetch, methods=["POST"]),
+    Route("/v1/answer", answer, methods=["POST"]),
+    Route("/a", answer_page),
     Route("/healthz", healthz),
 ])
