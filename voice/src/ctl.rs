@@ -98,9 +98,7 @@ pub fn on_ready(ok: bool) {
         log("ctl: not ready (speech permission or recognizer missing)");
         return;
     }
-    if !crate::audio::start() {
-        return;
-    }
+    crate::audio::start();
     with(|c| set_phase(c, Phase::Idle));
     log("ctl: listening for the wake word");
 }
