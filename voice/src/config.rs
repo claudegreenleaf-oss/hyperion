@@ -15,8 +15,11 @@ pub struct Config {
     pub silence_ms: u64,
     /// How long to wait for the answer before handing off to the browser.
     pub answer_budget_ms: u64,
-    /// Which openWakeWord model in Resources/models to use.
+    /// Wake word model: a file name in ~/.config/hyperion-voice/models or the app's
+    /// Resources/models (the first one found wins).
     pub wake_model: String,
+    /// Words the speech recognizer should expect (added to the built-in list).
+    pub vocabulary: Vec<String>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -25,7 +28,7 @@ pub fn get() -> &'static Config {
     CONFIG.get_or_init(load)
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
 }
 
@@ -44,6 +47,11 @@ fn load() -> Config {
         silence_ms: n("silence_ms", 650.0) as u64,
         answer_budget_ms: n("answer_budget_ms", 2600.0) as u64,
         wake_model: s("wake_model", "hey_jarvis_v0.1.onnx"),
+        vocabulary: v
+            .get("vocabulary")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|w| w.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
     }
 }
 

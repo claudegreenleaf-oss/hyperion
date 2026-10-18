@@ -30,7 +30,8 @@ fn session(path: &Path) -> ort::Result<Session> {
 }
 
 impl Detector {
-    pub fn new(dir: &Path, wake_model: &str) -> ort::Result<Self> {
+    /// `dir` holds the shared feature models; `wake_model` is the wake word model's path.
+    pub fn new(dir: &Path, wake_model: &Path) -> ort::Result<Self> {
         let mut mels = VecDeque::with_capacity(1000);
         // The Python pipeline starts with a window of ones so embeddings exist from the start.
         for _ in 0..MEL_WINDOW {
@@ -39,7 +40,7 @@ impl Detector {
         Ok(Self {
             mel: session(&dir.join("melspectrogram.onnx"))?,
             emb: session(&dir.join("embedding_model.onnx"))?,
-            wake: session(&dir.join(wake_model))?,
+            wake: session(wake_model)?,
             raw: VecDeque::with_capacity(FRAME + MEL_CONTEXT),
             mels,
             feats: VecDeque::with_capacity(128),

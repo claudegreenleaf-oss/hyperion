@@ -171,7 +171,10 @@ fn tx_send(tx: &Sender<Vec<f32>>, v: Vec<f32>) -> Result<(), ()> {
 fn worker(rx: Receiver<Vec<f32>>) {
     let cfg = config::get();
     let dir = crate::resources().join("models");
-    let mut det = match wake::Detector::new(&dir, &cfg.wake_model) {
+    let user = config::home().join(".config/hyperion-voice/models").join(&cfg.wake_model);
+    let wake_path = if user.exists() { user } else { dir.join(&cfg.wake_model) };
+    log(format!("wake: model {}", wake_path.display()));
+    let mut det = match wake::Detector::new(&dir, &wake_path) {
         Ok(d) => d,
         Err(e) => {
             log(format!("wake: model load failed: {e}"));

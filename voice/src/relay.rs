@@ -25,7 +25,7 @@ fn agent() -> &'static ureq::Agent {
 pub fn prefetch(q: String) {
     std::thread::spawn(move || {
         let url = format!("{}/v1/answer", config::get().relay);
-        let _ = agent().post(&url).send_json(json!({"q": q, "prefetch": true}));
+        let _ = agent().post(&url).send_json(json!({"q": q, "prefetch": true, "voice": true}));
     });
 }
 
@@ -33,7 +33,7 @@ pub fn prefetch(q: String) {
 pub fn ask(q: String, on_event: fn(u64, Value), gen: u64) {
     std::thread::spawn(move || {
         let url = format!("{}/v1/answer", config::get().relay);
-        let resp = match agent().post(&url).send_json(json!({"q": q})) {
+        let resp = match agent().post(&url).send_json(json!({"q": q, "voice": true})) {
             Ok(r) => r,
             Err(e) => {
                 log(format!("relay: {e}"));

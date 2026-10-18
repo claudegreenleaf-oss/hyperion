@@ -452,25 +452,22 @@ async def _run_search(q, n, fetch, max_chars, deadline, use_cache, t0):
     results, engine = (searches.get((q, n)) if use_cache else None), "cache"
     search_cached = results is not None
     if results is None:
-        # Race Yahoo (via SearXNG) against Bing's own page: they rank the same index almost
-        # identically, so the first to answer sets the results and seeds the page fetches,
-        # and either one covers for the other when it is slow, rate-limited or challenged.
-        racers = {asyncio.create_task(_searx(q, n, bang="!yh"), name="yahoo"),
-                  asyncio.create_task(_bing(q, n), name="bing")}
+        # Yahoo (through SearXNG) first. Bing's own results page used to race it, but from this
+        # box it now matches a single query word ("how many people live in Texas" returned
+        # dictionary pages for "many"), so Bing is only a fallback when Yahoo fails.
         results, err, engine = None, None, ""
-        pending = racers
-        while pending and results is None:
-            done, pending = await asyncio.wait(pending, timeout=max(0.5, min(5.0, deadline - time.monotonic())),
-                                               return_when=asyncio.FIRST_COMPLETED)
-            if not done:
+        for name, make in (("yahoo", lambda: _searx(q, n, bang="!yh")), ("bing", lambda: _bing(q, n))):
+            left = deadline - time.monotonic()
+            if left <= 0.2:
                 break
-            for t in done:
-                if t.exception() is None and t.result():
-                    results, engine = t.result(), t.get_name()
-                    break
-                err = t.exception() or err
-        for t in pending:
-            t.cancel()
+            try:
+                got = await asyncio.wait_for(make(), timeout=min(4.0, left))
+            except Exception as e:  # timeouts, HTTP errors, challenge pages
+                err = e
+                continue
+            if got:
+                results, engine = got, name
+                break
         if not results:
             msg = f"{type(err).__name__}: {err}" if err else "no results"
             raise SearchError(f"search failed: {msg}"[:300])
@@ -529,11 +526,21 @@ async def fetch(request: Request):
 answers = TTLCache(300, 10 * 60)
 
 
-async def _produce(q: str, st: ans.Stream):
+async def _produce(q: str, st: ans.Stream, voice: bool = False):
     """Fill one answer stream: sources, page texts, the extracted sentence, then the answer."""
     t0 = time.monotonic()
+    sq = q
+    if voice:
+        sq = await ans.search_query(q) or q
+        await st.put({"type": "query", "q": sq})
+    direct = await ans.direct_answer(q) if ans.is_computation(q) else None
+    if direct:
+        await st.put({"type": "answer", "easy": True, "short": direct, "url": "", "host": "computed",
+                      "by": "model", "model": ans.MODEL})
+        await st.put({"type": "done"}, last=True)
+        return
     try:
-        out = await _run_search(q, 8, 3, 8000, t0 + 4.0, True, t0)
+        out = await _run_search(sq, 8, 3, 8000, t0 + 4.5, True, t0)
     except SearchError as e:
         await st.put({"type": "error", "error": str(e)}, last=True)
         return
@@ -545,20 +552,20 @@ async def _produce(q: str, st: ans.Stream):
     await st.put({"type": "pages", "pages": [
         {"url": p["url"], "final_url": p.get("final_url", p["url"]), "title": p.get("title", ""),
          "host": ans.host_of(p.get("final_url", p["url"])), "text": p["text"]} for p in got]})
-    picks = ans.best_sentences(q, got)
+    picks = ans.best_sentences(sq, got)
     best = picks[0] if picks else None
     if best:
         page = got[best["i"]]
         await st.put({"type": "passage", "text": best["text"], "score": best["score"], "url": page["url"],
                       "host": ans.host_of(page.get("final_url", page["url"])), "title": page.get("title", "")})
     excerpts = [{"text": c["text"], "host": ans.host_of(got[c["i"]]["url"]), "url": got[c["i"]]["url"]} for c in picks[:5]]
-    m = await ans.model_answer(q, excerpts)
+    m = await ans.model_answer(sq, excerpts)
     if m and m.get("easy"):
         src = excerpts[m["ref"]]
         ev = {"type": "answer", "easy": True, "short": m["short"], "url": src["url"], "host": src["host"],
               "passage": src["text"], "by": "model", "model": ans.MODEL, "model_ms": m["ms"]}
     elif best:
-        easy = ans.heuristic_easy(q, best) and m is None
+        easy = ans.heuristic_easy(sq, best) and m is None
         ev = {"type": "answer", "easy": easy, "short": best["text"], "url": excerpts[0]["url"],
               "host": excerpts[0]["host"], "by": "extract", "model_ms": m["ms"] if m else None}
     else:
@@ -581,7 +588,7 @@ async def answer(request: Request):
     if st is None:
         st = ans.Stream()
         answers.put(key, st)
-        asyncio.get_running_loop().create_task(_produce(q, st))
+        asyncio.get_running_loop().create_task(_produce(q, st, bool(d.get("voice"))))
     if d.get("prefetch"):
         return Response(status_code=204)
     texts = bool(d.get("texts"))

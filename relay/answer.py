@@ -166,6 +166,52 @@ async def model_answer(q: str, excerpts: list[dict]) -> dict | None:
     return {"easy": True, "short": short, "ref": ref if 0 <= ref < len(excerpts) else 0, "ms": ms}
 
 
+COMPUTE = re.compile(r"^\s*(what('s| is)\s+)?(\d[\d,.\s]*\s*([-+*/x^%]|plus|minus|times|divided by|percent of)\s*\d|"
+                     r"(the\s+)?(square root|cube root|log|sin|cos|tan)\b|\d[\d,.]*\s*(°?[fc]|degrees|miles|km|kg|lbs?|pounds|"
+                     r"feet|ft|meters|inches|cups|ounces|oz|liters|gallons)\s+(in|to)\s+)", re.I)
+
+
+def is_computation(q: str) -> bool:
+    return bool(COMPUTE.search(q))
+
+
+async def _chat(system: str, user: str, max_tokens: int, budget: float) -> str | None:
+    if not _llm:
+        return None
+    try:
+        r = await asyncio.wait_for(_llm.post(f"{LLM}/v1/chat/completions", json={
+            "model": MODEL, "max_tokens": max_tokens, "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }), budget)
+        return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except (asyncio.TimeoutError, httpx.HTTPError, KeyError, IndexError, ValueError):
+        return None
+
+
+REWRITE = ("Turn the spoken question into a short web search query of 3 to 9 words. Speech recognition may have "
+           "misheard words: fix them when the context makes the intended word clear (college admissions: REA, EA, "
+           "ED, RD, Common App, supplemental essays; school: AP, SAT, FAFSA). Keep names and numbers. "
+           "Reply with only the query.")
+
+
+async def search_query(spoken: str) -> str | None:
+    """A clean search query from a spoken question (about 0.15 s)."""
+    out = await _chat(REWRITE, spoken, 24, 0.8)
+    if not out or len(out) > 120 or "\n" in out:
+        return None
+    return out.strip().strip('"').strip()
+
+
+async def direct_answer(q: str) -> str | None:
+    """Arithmetic and unit conversions need no search."""
+    out = await _chat("Answer the arithmetic or unit conversion with only the result, at most 10 words. "
+                      "If it is not arithmetic or a unit conversion, reply exactly NO.", q, 24, 0.8)
+    if not out or out.upper().startswith("NO") or len(out) > 80:
+        return None
+    return out
+
+
 class Stream:
     """Events of one answer, shared by every request for the same query (the listener's
     speculative request, the final one and the answer page's) and replayed from cache."""

@@ -13,6 +13,13 @@ use crate::config::log;
 use crate::ctl;
 use crate::objc::{main_async, ns, string};
 
+const VOCAB: &[&str] = &[
+    "REA", "Restrictive Early Action", "Early Action", "Early Decision", "Regular Decision", "supplemental",
+    "supplemental essays", "Common App", "FAFSA", "CSS Profile", "AP Physics C", "AP Bio", "Canvas", "Naviance",
+    "SAT", "ACT", "Harvard", "Stanford", "Yale", "MIT", "Princeton", "Menlo-Atherton", "M-A Chronicle",
+    "SCOTUS", "Hyperion", "Helium", "Karabiner", "AeroSpace", "GitHub", "Tailscale", "Claude", "Anthropic",
+];
+
 struct Rec {
     recognizer: Retained<AnyObject>,
     request: Option<Retained<AnyObject>>,
@@ -75,6 +82,12 @@ pub fn start(gen: u64) {
                 let _: () = msg_send![&*req, setRequiresOnDeviceRecognition: true];
             }
             let _: () = msg_send![&*req, setTaskHint: 2isize]; // SFSpeechRecognitionTaskHintSearch
+            // Bias recognition toward words Thomas actually searches for.
+            let words: Retained<AnyObject> = msg_send![class!(NSMutableArray), new];
+            for w in VOCAB.iter().map(|s| s.to_string()).chain(crate::config::get().vocabulary.iter().cloned()) {
+                let _: () = msg_send![&*words, addObject: &*ns(&w)];
+            }
+            let _: () = msg_send![&*req, setContextualStrings: &*words];
             let responds: bool = msg_send![&*req, respondsToSelector: sel!(setAddsPunctuation:)];
             if responds {
                 let _: () = msg_send![&*req, setAddsPunctuation: false];

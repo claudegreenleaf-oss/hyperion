@@ -114,7 +114,8 @@ async function run(q) {
 }
 
 function onEvent(ev, secs) {
-  if (ev.type === "sources") { S.results = ev.results; S.t.sources = secs; renderSources(); }
+  if (ev.type === "query") { S.searched = ev.q; $("foot").textContent = `Heard “${S.q}”, searched for “${ev.q}”`; }
+  else if (ev.type === "sources") { S.results = ev.results; S.t.sources = secs; renderSources(); }
   else if (ev.type === "pages") { S.pages = ev.pages; renderDoc(); }
   else if (ev.type === "passage") { S.passage = ev; S.t.passage = secs; renderAnswer(); renderDoc(); }
   else if (ev.type === "answer") {
