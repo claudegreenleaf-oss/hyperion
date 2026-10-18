@@ -30,6 +30,8 @@ fn builtin() -> Vec<(&'static str, &'static str, &'static str)> {
         ("mac.unmute", "Unmute the Mac's sound", ""),
         ("mac.brightness", "Set the built-in display's brightness", "percent"),
         ("mac.reminder", "Add a reminder to the Reminders app", "title, due"),
+        ("mac.lock_screen", "Lock the screen", ""),
+        ("mac.sleep", "Put the Mac to sleep", ""),
     ]
 }
 
@@ -167,6 +169,25 @@ fn set_brightness(level: f64) -> Result<(), String> {
     }
 }
 
+/// Lock the screen right away, the way the menu bar's Lock Screen does (login.framework).
+fn lock_screen() -> Result<(), String> {
+    unsafe {
+        let path = CString::new("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login").unwrap();
+        let h = dlopen(path.as_ptr(), 1);
+        if h.is_null() {
+            return Err("login framework unavailable".into());
+        }
+        let sym = CString::new("SACLockScreenImmediate").unwrap();
+        let f = dlsym(h, sym.as_ptr());
+        if f.is_null() {
+            return Err("SACLockScreenImmediate missing".into());
+        }
+        let lock: extern "C" fn() -> c_int = std::mem::transmute(f);
+        lock();
+        Ok(())
+    }
+}
+
 /// "2026-10-19T09:00" -> (y, m, d, h, min)
 fn parse_due(s: &str) -> Option<(u32, u32, u32, u32, u32)> {
     let s = s.trim();
@@ -252,6 +273,8 @@ pub fn run(id: &str, args: &HashMap<String, String>) -> Result<(), String> {
         "mac.unmute" => osascript("set volume without output muted"),
         "mac.brightness" => set_brightness(percent(args)?),
         "mac.reminder" => reminder(args),
+        "mac.lock_screen" => lock_screen(),
+        "mac.sleep" => Command::new("/usr/bin/pmset").arg("sleepnow").status().map(|_| ()).map_err(|e| e.to_string()),
         _ => match id.strip_prefix("rc:") {
             Some(path) => {
                 let mode = entries().get(id).map(|e| e.mode.as_str()).ok_or("not an installed Raycast command")?;

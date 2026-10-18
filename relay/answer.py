@@ -226,7 +226,7 @@ async def _local_chat(system: str, user: str, max_tokens: int, budget: float) ->
 ROUTE = """Route a request spoken to a Mac voice assistant. Reply with one JSON object only.
 {{"kind":"command","id":"c3","args":{{"arg":"value"}},"done":"at most 4 words"}} if one of COMMANDS does it. Use its argument names; times like 2026-10-19T09:00; for on, off or a level use a set command with a value, not a toggle.
 {{"kind":"open","url":"https://...","label":"Site"}} to go to a website. Installed apps are commands.
-{{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions or spelling (60 words max).
+{{"kind":"answer","answer":"..."}} only for arithmetic, unit conversions, definitions, spelling, the current time or date (from Now), or questions about you: you are Thomas's voice assistant, built into his browser, Hyperion (60 words max).
 {{"kind":"search","query":"..."}} for any other question: a short web query, fixing misheard words ("REI" or "RAE" is REA, "supplements" is supplemental essays).
 COMMANDS:
 {commands}"""
