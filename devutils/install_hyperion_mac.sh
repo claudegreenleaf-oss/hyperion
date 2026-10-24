@@ -7,10 +7,16 @@ APP=/Applications/Hyperion.app
 TMP=$(mktemp -d)
 trap 'hdiutil detach -quiet "$TMP/mnt" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
-RUN=${1:-$(gh run list -R "$REPO" --workflow "Build macOS binaries of Helium" --status success --limit 10 \
-  --json databaseId -q '.[].databaseId' | while read -r r; do
-    gh api "repos/$REPO/actions/runs/$r/artifacts" -q '.artifacts[].name' | grep -q 'arm64-macos\.dmg$' && { echo "$r"; break; }
-  done)}
+newest_dmg_run() {
+  local r
+  for r in $(gh run list -R "$REPO" --workflow "Build macOS binaries of Helium" --status success --limit 10 \
+      --json databaseId -q '.[].databaseId'); do
+    if gh api "repos/$REPO/actions/runs/$r/artifacts" -q '.artifacts[].name' | grep -q 'arm64-macos\.dmg$'; then
+      echo "$r"; return
+    fi
+  done
+}
+RUN=${1:-$(newest_dmg_run)}
 [ -n "$RUN" ] || { echo "no finished build with a DMG yet" >&2; exit 1; }
 
 NAME=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts" -q '.artifacts[].name' | grep 'arm64-macos\.dmg$' | head -1)
