@@ -1,0 +1,35 @@
+# Helium deletes the price insights and discounts page actions, but CommerceUiTabHelper
+# still updates them for profiles that pass the shopping eligibility check (a signed-in
+# Google account imported from Chrome), dereferencing a null controller on every navigation.
+
+--- a/chrome/browser/ui/commerce/commerce_ui_tab_helper.cc
++++ b/chrome/browser/ui/commerce/commerce_ui_tab_helper.cc
+@@ -218,7 +218,13 @@
+ }
+ 
+ void CommerceUiTabHelper::UpdatePriceInsightsIconView() {
+-  PriceInsightsPageActionViewController::From(tab())->UpdatePageActionIcon(
++  // Helium removes this page action, so there is no controller. Chrome profiles
++  // signed in to a Google account still pass the eligibility check.
++  auto* controller = PriceInsightsPageActionViewController::From(tab());
++  if (!controller) {
++    return;
++  }
++  controller->UpdatePageActionIcon(
+       ShouldShowPriceInsightsIconView(),
+       ShouldExpandPageActionIcon(PageActionIconType::kPriceInsights),
+       GetPriceInsightsIconLabelTypeForPage());
+@@ -468,7 +474,12 @@
+ }
+ 
+ void CommerceUiTabHelper::UpdateDiscountsIconView() {
+-  DiscountsPageActionViewController::From(tab())->UpdatePageIcon(
++  // Removed by Helium, like the price insights page action.
++  auto* controller = DiscountsPageActionViewController::From(tab());
++  if (!controller) {
++    return;
++  }
++  controller->UpdatePageIcon(
+       ShouldShowDiscountsIconView(),
+       ShouldExpandPageActionIcon(PageActionIconType::kDiscounts));
+ }

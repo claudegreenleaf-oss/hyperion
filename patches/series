@@ -35,3 +35,4 @@ hyperion/cache-content-addressed.patch
 hyperion/navigation-model.patch
 hyperion/prerender-governor.patch
 hyperion/identity.patch
+hyperion/commerce-removed-page-actions.patch
