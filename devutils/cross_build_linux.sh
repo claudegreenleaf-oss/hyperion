@@ -72,7 +72,7 @@ PKGS
       ;;
     gen)
       write_gn_args arm64 release true
-      printf 'target_os = "mac"\nuse_system_xcode = false\n' >> "$_out_dir/args.gn"
+      printf 'target_os = "mac"\nuse_system_xcode = false\n# Helium hardcodes /usr/bin/dsymutil; dSYMs are not needed here.\nenable_dsyms = false\n' >> "$_out_dir/args.gn"
       sed -i '/cc_wrapper/d' "$_out_dir/args.gn"
       cd "$_src_dir"
       ___helium_install_cipd_deps
@@ -82,7 +82,7 @@ PKGS
     build)
       cd "$_src_dir"
       SISO_PATH="$_siso_path" python3 "$_depot_tools_dir/autoninja.py" -C "$_out_dir" \
-        -j "${JOBS:-120}" chrome
+        -j "${JOBS:-120}" -k 0 chrome
       ;;
     *) echo "unknown stage $stage" >&2; exit 2 ;;
   esac
