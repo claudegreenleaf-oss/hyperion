@@ -1,0 +1,37 @@
+# Give Hyperion its own bundle id, profile directory and Safe Storage keychain item so it
+# runs beside stock Helium instead of sharing its profile and encryption key.
+
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -5,6 +5,6 @@
+ PRODUCT_INSTALLER_FULLNAME=Helium Installer
+ PRODUCT_INSTALLER_SHORTNAME=Helium Installer
+ COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Helium Authors. All rights reserved.
+-MAC_BUNDLE_ID=net.imput.helium
++MAC_BUNDLE_ID=com.thomasgreenleaf.hyperion
+ MAC_CREATOR_CODE=Cr24
+ MAC_TEAM_ID=S4Q33XPHB4
+--- a/chrome/common/chrome_paths_mac.mm
++++ b/chrome/common/chrome_paths_mac.mm
+@@ -32,7 +32,7 @@
+     product_dir_name = [product_dir_name_ns fileSystemRepresentation];
+ 
+     if (!product_dir_name) {
+-      product_dir_name = "net.imput.helium";
++      product_dir_name = "Hyperion";
+     }
+ 
+     // Leaked, but the only caller initializes a static with this result, so it
+--- a/components/os_crypt/common/keychain_password_mac.mm
++++ b/components/os_crypt/common/keychain_password_mac.mm
+@@ -31,8 +31,8 @@
+ // These two strings ARE indeed user facing.  But they are used to access
+ // the encryption keyword.  So as to not lose encrypted data when system
+ // locale changes we DO NOT LOCALIZE.
+-const char kDefaultServiceName[] = "Helium Storage Key";
+-const char kDefaultAccountName[] = "Helium";
++const char kDefaultServiceName[] = "Hyperion Safe Storage";
++const char kDefaultAccountName[] = "Hyperion";
+ 
+ // These values are persisted to logs. Entries should not be renumbered and
+ // numeric values should never be reused.
